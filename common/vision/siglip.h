@@ -47,6 +47,7 @@ typedef struct {
 
 /* Forward pass: image [3, H, W] -> [num_patches, hidden].
  * Returns malloc'd output. Caller must free. Sets *out_seq_len. */
+__attribute__((visibility("default")))
 float *siglip_forward(const siglip_encoder_t *enc, const siglip_config_t *cfg,
                       const float *image, int channels, int height, int width,
                       int *out_seq_len);

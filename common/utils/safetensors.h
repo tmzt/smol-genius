@@ -48,30 +48,42 @@ typedef struct {
 } multi_safetensors_t;
 
 /* Open a single safetensors file (memory-mapped) */
+__attribute__((visibility("default")))
 safetensors_file_t *safetensors_open(const char *path);
+__attribute__((visibility("default")))
 void safetensors_close(safetensors_file_t *sf);
 
 /* Open model from directory (auto-detects single file or multi-shard) */
+__attribute__((visibility("default")))
 multi_safetensors_t *multi_safetensors_open(const char *model_dir);
+__attribute__((visibility("default")))
 void multi_safetensors_close(multi_safetensors_t *ms);
 
 /* Find a tensor by name across all shards */
+__attribute__((visibility("default")))
 const safetensor_t *multi_safetensors_find(const multi_safetensors_t *ms,
                                             const char *name,
                                             safetensors_file_t **out_sf);
 
 /* Get raw pointer to tensor data (within mmap'd region) */
+__attribute__((visibility("default")))
 const void *safetensors_data(const safetensors_file_t *sf, const safetensor_t *t);
 
 /* Get tensor data as float32 (allocates, caller must free) */
+__attribute__((visibility("default")))
 float *safetensors_get_f32(const safetensors_file_t *sf, const safetensor_t *t);
 
 /* Get direct pointer to bf16 data in mmap'd region (no copy) */
+__attribute__((visibility("default")))
 uint16_t *safetensors_get_bf16_direct(const safetensors_file_t *sf, const safetensor_t *t);
 
+__attribute__((visibility("default")))
 int safetensor_is_bf16(const safetensor_t *t);
+__attribute__((visibility("default")))
 int64_t safetensor_numel(const safetensor_t *t);
+__attribute__((visibility("default")))
 void safetensor_print(const safetensor_t *t);
+__attribute__((visibility("default")))
 void safetensors_print_all(const safetensors_file_t *sf);
 
 #endif /* SMOL_SAFETENSORS_H */

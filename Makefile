@@ -3,7 +3,7 @@
 
 CC = clang
 AR = ar
-CFLAGS = -O3 -ffast-math -fPIC -std=c11 -Wall
+CFLAGS = -O3 -ffast-math -fPIC -std=c11 -Wall -fvisibility=hidden
 LDFLAGS = -lm -lpthread
 
 # Include paths

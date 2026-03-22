@@ -33,13 +33,16 @@ typedef struct {
  * Handles: 16-bit PCM, mono or stereo (mixed to mono).
  * Resamples to 16kHz if needed.
  * Returns NULL on error. Caller must free returned buffer. */
+__attribute__((visibility("default")))
 float *smol_load_wav(const char *path, int *out_n_samples);
 
 /* Parse a WAV file from a memory buffer. Caller must free returned buffer. */
+__attribute__((visibility("default")))
 float *smol_parse_wav_buffer(const uint8_t *data, size_t size, int *out_n_samples);
 
 /* Read audio from stdin (auto-detect WAV or raw s16le 16kHz mono).
  * Returns NULL on error. Caller must free returned buffer. */
+__attribute__((visibility("default")))
 float *smol_read_pcm_stdin(int *out_n_samples);
 
 /* ========================================================================
@@ -53,6 +56,7 @@ float *smol_read_pcm_stdin(int *out_n_samples);
  * out_frames: set to number of mel frames produced
  * Returns: [128, n_frames] mel spectrogram (caller must free)
  * Note: Returns in [mel_bins, frames] layout for Conv2D compatibility. */
+__attribute__((visibility("default")))
 float *smol_mel_spectrogram(const float *samples, int n_samples, int *out_frames);
 
 /* ========================================================================
@@ -62,9 +66,11 @@ float *smol_mel_spectrogram(const float *samples, int n_samples, int *out_frames
 /* Start a reader thread that incrementally fills a live audio buffer from stdin.
  * Detects WAV vs raw s16le. For WAV, requires 16kHz sample rate.
  * Returns NULL on error. Caller must call smol_live_audio_free() when done. */
+__attribute__((visibility("default")))
 smol_live_audio_t *smol_live_audio_start_stdin(void);
 
 /* Join reader thread and free all resources. */
+__attribute__((visibility("default")))
 void smol_live_audio_free(smol_live_audio_t *la);
 
 #endif /* SMOL_AUDIO_H */

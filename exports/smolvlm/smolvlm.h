@@ -207,16 +207,20 @@ typedef struct {
  * ======================================================================== */
 
 /* Load model from directory */
+__attribute__((visibility("default")))
 smolvlm_ctx_t *smolvlm_load(const char *model_dir);
 
 /* Free all resources */
+__attribute__((visibility("default")))
 void smolvlm_free(smolvlm_ctx_t *ctx);
 
 /* Set token streaming callback */
+__attribute__((visibility("default")))
 void smolvlm_set_token_callback(smolvlm_ctx_t *ctx, smolvlm_token_cb cb, void *userdata);
 
 /* Generate text from image + prompt. Returns allocated string (caller must free).
  * system_prompt may be NULL for no system prompt. */
+__attribute__((visibility("default")))
 char *smolvlm_generate(smolvlm_ctx_t *ctx, const char *image_path,
                         const char *prompt, const char *system_prompt,
                         int max_tokens);

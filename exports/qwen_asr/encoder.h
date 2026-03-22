@@ -80,12 +80,14 @@ typedef struct {
 } qwen_asr_encoder_t;
 
 /* Load encoder weights from safetensors */
+__attribute__((visibility("default")))
 int qwen_asr_encoder_load(qwen_asr_encoder_t *enc, multi_safetensors_t *ms,
                            const qwen_asr_enc_config_t *cfg);
 
 /* Encoder forward pass.
  * mel: [128, mel_frames] mel spectrogram
  * Returns encoder output embeddings (caller must free), sets *out_seq_len. */
+__attribute__((visibility("default")))
 float *qwen_asr_encoder_forward(qwen_asr_encoder_t *enc,
                                  const qwen_asr_enc_config_t *cfg,
                                  const float *mel, int mel_frames,

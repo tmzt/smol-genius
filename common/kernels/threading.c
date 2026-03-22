@@ -3,7 +3,7 @@
  * Extracted from qwen_asr_kernels.c, prefixes renamed qwen_->smol_, QWEN_->SMOL_.
  */
 
-#include <stdint.h>
+#include "smol_kernels.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
