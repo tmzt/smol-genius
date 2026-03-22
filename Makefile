@@ -113,9 +113,14 @@ lib: libsmol.a
 libsmol.a: $(ALL_OBJS)
 	$(AR) rcs $@ $^
 
-# Compile rules
+# Compile rules (with auto-dependency generation)
+DEPFLAGS = -MMD -MP
+ALL_DEPS = $(ALL_OBJS:.o=.d)
+
 %.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+
+-include $(ALL_DEPS)
 
 # Test target
 test: $(TEST_TARGETS)
@@ -125,8 +130,8 @@ test: $(TEST_TARGETS)
 # =====================================================================
 
 clean:
-	rm -f $(ALL_OBJS) libsmol.a test_math
-	find . -name '*.o' -delete
+	rm -f $(ALL_OBJS) $(ALL_DEPS) libsmol.a test_math
+	find . \( -name '*.o' -o -name '*.d' \) -delete
 
 info:
 	@echo "Platform:  $(UNAME_S) $(UNAME_M)"
