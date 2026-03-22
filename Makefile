@@ -75,6 +75,12 @@ ifdef MODEL
   include exports/$(MODEL)/build.mk
 endif
 
+# Feature dependencies: exports set ENABLE_* flags, common layers check them
+ifdef ENABLE_AUDIO
+  CFLAGS += -Icommon/audio
+  include common/audio/build.mk
+endif
+
 # =====================================================================
 # Build rules
 # =====================================================================
@@ -101,6 +107,7 @@ help:
 	@echo "Build with model export:"
 	@echo "  make lib MODEL=gemma        - Include Gemma decoder export"
 	@echo "  make lib MODEL=nomic        - Include Nomic embedding export"
+	@echo "  make lib MODEL=qwen_asr     - Include Qwen ASR encoder export (implies audio)"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make test                  - Run all test suites"
@@ -143,4 +150,7 @@ info:
 	@echo "LTO_SRCS:  $(LTO_SRCS)"
 ifdef MODEL
 	@echo "MODEL:     $(MODEL)"
+endif
+ifdef ENABLE_AUDIO
+	@echo "AUDIO:     enabled"
 endif
