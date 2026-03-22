@@ -15,7 +15,6 @@
 #include "../../common/kernels/smol_kernels.h"
 #include "../../common/utils/safetensors.h"
 #include "../../common/utils/tokenizer.h"
-#include "../../common/utils/safetensors.h"
 
 #include <stdint.h>
 
@@ -123,19 +122,6 @@ typedef struct {
     float *rope_cos;             /* [max_total, head_dim] RoPE cosines */
     float *rope_sin;             /* [max_total, head_dim] RoPE sines */
 } nomic_ctx_t;
-
-/* ========================================================================
- * Q4/Pooling Dispatch Wrappers (defined in common/kernels/q4_dispatch.c)
- *
- * These are not yet in smol_kernels.h; declared here until promoted.
- * ======================================================================== */
-
-void smol_dequantize_q4(float *out, const uint8_t *packed,
-                         const uint16_t *scales_f16, int n, int block_size);
-
-void smol_mean_pool(float *out, const float *hidden_states,
-                     const int *seq_starts, const int *seq_lens,
-                     int num_seqs, int hidden);
 
 /* ========================================================================
  * FFI API
