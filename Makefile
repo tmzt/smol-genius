@@ -1,104 +1,141 @@
-# qwen_asr — Qwen3-ASR Pure C Inference Engine
-# Makefile
+# smol-genius — Modular Text-Only AI Edge Daemon
+# Composable Multi-Target Makefile
 
-CC = gcc
-CFLAGS_BASE = -Wall -Wextra -O3 -march=native -ffast-math
+CC = clang
+AR = ar
+CFLAGS = -O3 -ffast-math -fPIC -std=c11 -Wall
 LDFLAGS = -lm -lpthread
+
+# Include paths
+CFLAGS += -Icommon/kernels -Icommon/utils
+
+# Source accumulators
+SRCS =
+LTO_SRCS =
+TEST_TARGETS =
 
 # Platform detection
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 
-# Source files
-SRCS = qwen_asr.c qwen_asr_kernels.c qwen_asr_kernels_generic.c qwen_asr_kernels_neon.c qwen_asr_kernels_avx.c qwen_asr_audio.c qwen_asr_encoder.c qwen_asr_decoder.c qwen_asr_tokenizer.c qwen_asr_safetensors.c
+# =====================================================================
+# Hardware detection and flags
+# =====================================================================
+
+# Auto-detect ARCH if not specified
+ifndef ARCH
+  ifeq ($(UNAME_M),arm64)
+    ARCH = neon
+  else ifeq ($(UNAME_M),aarch64)
+    ARCH = neon
+  else ifneq (,$(findstring x86,$(UNAME_M)))
+    ARCH = avx
+  else ifneq (,$(findstring AMD64,$(UNAME_M)))
+    ARCH = avx
+  else
+    ARCH = generic
+  endif
+endif
+
+# Architecture-specific compiler flags
+ifeq ($(ARCH),neon)
+  CFLAGS += -march=native
+else ifeq ($(ARCH),avx)
+  CFLAGS += -march=native -mavx2 -mfma
+else
+  CFLAGS += -march=native
+endif
+
+# BLAS support
+ifdef USE_BLAS
+  CFLAGS += -DUSE_BLAS
+  ifeq ($(UNAME_S),Darwin)
+    CFLAGS += -DACCELERATE_NEW_LAPACK
+    LDFLAGS += -framework Accelerate
+  else
+    CFLAGS += -DUSE_OPENBLAS -I/usr/include/openblas
+    LDFLAGS += -lopenblas
+  endif
+endif
+
+# LTO toggle
+ifdef LTO
+  CFLAGS += -flto
+  LDFLAGS += -flto
+endif
+
+# =====================================================================
+# Dynamic inclusion of sub-makefiles
+# =====================================================================
+
+include common/utils/build.mk
+include common/kernels/build.mk
+
+ifdef MODEL
+  include exports/$(MODEL)/build.mk
+endif
+
+# =====================================================================
+# Build rules
+# =====================================================================
+
 OBJS = $(SRCS:.c=.o)
-MAIN = main.c
-TARGET = qwen_asr
+LTO_OBJS = $(LTO_SRCS:.c=.o)
+ALL_OBJS = $(OBJS) $(LTO_OBJS)
 
-# Debug build flags
-DEBUG_CFLAGS = -Wall -Wextra -g -O0 -DDEBUG -fsanitize=address
+.PHONY: all clean help info test lib
 
-.PHONY: all clean debug info help blas test test-stream-cache
-
-# Default: show available targets
 all: help
 
 help:
-	@echo "qwen_asr — Qwen3-ASR Pure C Inference - Build Targets"
+	@echo "smol-genius — Modular AI Edge Daemon - Build Targets"
 	@echo ""
-	@echo "Choose a backend:"
-	@echo "  make blas     - With BLAS acceleration (Accelerate/OpenBLAS)"
+	@echo "Build library:"
+	@echo "  make lib                    - Build libsmol.a (auto-detect arch)"
+	@echo "  make lib USE_BLAS=1         - Build with BLAS acceleration"
+	@echo "  make lib LTO=1             - Build with link-time optimization"
+	@echo "  make lib ARCH=neon         - Force ARM NEON backend"
+	@echo "  make lib ARCH=avx          - Force x86 AVX backend"
+	@echo "  make lib ARCH=generic      - Force generic C backend"
+	@echo ""
+	@echo "Build with model export:"
+	@echo "  make lib MODEL=gemma        - Include Gemma decoder export"
+	@echo "  make lib MODEL=nomic        - Include Nomic embedding export"
 	@echo ""
 	@echo "Other targets:"
-	@echo "  make debug    - Debug build with AddressSanitizer"
-	@echo "  make test     - Run regression suite (requires ./qwen_asr and model files)"
-	@echo "  make test-stream-cache - Run stream cache on/off equivalence check"
-	@echo "  make clean    - Remove build artifacts"
-	@echo "  make info     - Show build configuration"
-	@echo ""
-	@echo "Example: make blas && ./qwen_asr -d model_dir -i audio.wav"
+	@echo "  make test                  - Run all test suites"
+	@echo "  make clean                 - Remove build artifacts"
+	@echo "  make info                  - Show build configuration"
 
-# =============================================================================
-# Backend: blas (Accelerate on macOS, OpenBLAS on Linux)
-# =============================================================================
-ifeq ($(UNAME_S),Darwin)
-blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DACCELERATE_NEW_LAPACK
-blas: LDFLAGS += -framework Accelerate
-else
-blas: CFLAGS = $(CFLAGS_BASE) -DUSE_BLAS -DUSE_OPENBLAS -I/usr/include/openblas
-blas: LDFLAGS += -lopenblas
-endif
-blas:
-	@$(MAKE) clean
-	@$(MAKE) $(TARGET) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"
-	@echo ""
-	@echo "Built with BLAS backend"
+# Library target
+lib: libsmol.a
 
-# =============================================================================
-# Build rules
-# =============================================================================
-$(TARGET): $(OBJS) main.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+libsmol.a: $(ALL_OBJS)
+	$(AR) rcs $@ $^
 
-%.o: %.c qwen_asr.h qwen_asr_kernels.h
+# Compile rules
+%.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Debug build
-debug: CFLAGS = $(DEBUG_CFLAGS)
-debug: LDFLAGS += -fsanitize=address
-debug:
-	@$(MAKE) clean
-	@$(MAKE) $(TARGET) CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)"
+# Test target
+test: $(TEST_TARGETS)
 
-# =============================================================================
+# =====================================================================
 # Utilities
-# =============================================================================
+# =====================================================================
+
 clean:
-	rm -f $(OBJS) main.o $(TARGET)
+	rm -f $(ALL_OBJS) libsmol.a test_math
+	find . -name '*.o' -delete
 
 info:
-	@echo "Platform: $(UNAME_S)"
-	@echo "Compiler: $(CC)"
-	@echo ""
-ifeq ($(UNAME_S),Darwin)
-	@echo "Backend: blas (Apple Accelerate)"
-else
-	@echo "Backend: blas (OpenBLAS)"
+	@echo "Platform:  $(UNAME_S) $(UNAME_M)"
+	@echo "Compiler:  $(CC)"
+	@echo "Arch:      $(ARCH)"
+	@echo "CFLAGS:    $(CFLAGS)"
+	@echo "LDFLAGS:   $(LDFLAGS)"
+	@echo "SRCS:      $(SRCS)"
+	@echo "LTO_SRCS:  $(LTO_SRCS)"
+ifdef MODEL
+	@echo "MODEL:     $(MODEL)"
 endif
-
-test:
-	./asr_regression.py --binary ./qwen_asr --model-dir qwen3-asr-1.7b
-
-# =============================================================================
-# Dependencies
-# =============================================================================
-qwen_asr.o: qwen_asr.c qwen_asr.h qwen_asr_kernels.h qwen_asr_safetensors.h qwen_asr_audio.h qwen_asr_tokenizer.h
-qwen_asr_kernels.o: qwen_asr_kernels.c qwen_asr_kernels.h qwen_asr_kernels_impl.h
-qwen_asr_kernels_generic.o: qwen_asr_kernels_generic.c qwen_asr_kernels_impl.h
-qwen_asr_kernels_neon.o: qwen_asr_kernels_neon.c qwen_asr_kernels_impl.h
-qwen_asr_kernels_avx.o: qwen_asr_kernels_avx.c qwen_asr_kernels_impl.h
-qwen_asr_audio.o: qwen_asr_audio.c qwen_asr_audio.h
-qwen_asr_encoder.o: qwen_asr_encoder.c qwen_asr.h qwen_asr_kernels.h qwen_asr_safetensors.h
-qwen_asr_decoder.o: qwen_asr_decoder.c qwen_asr.h qwen_asr_kernels.h qwen_asr_safetensors.h
-qwen_asr_tokenizer.o: qwen_asr_tokenizer.c qwen_asr_tokenizer.h
-qwen_asr_safetensors.o: qwen_asr_safetensors.c qwen_asr_safetensors.h
-main.o: main.c qwen_asr.h qwen_asr_kernels.h

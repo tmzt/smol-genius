@@ -1,0 +1,127 @@
+/*
+ * smol_kernels.h - Unified math kernel API for smol-genius inference
+ *
+ * Low-level math operations. All operate on float32 tensors in row-major order.
+ * Architecture dispatch is handled internally via smol_kernels_impl.h.
+ */
+
+#ifndef SMOL_KERNELS_H
+#define SMOL_KERNELS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+/* ========================================================================
+ * Basic Operations
+ * ======================================================================== */
+
+void smol_add_inplace(float *a, const float *b, int n);
+void smol_mul_inplace(float *a, const float *b, int n);
+void smol_scale(float *x, float s, int n);
+void smol_copy(float *dst, const float *src, int n);
+
+/* ========================================================================
+ * Matrix Operations
+ * ======================================================================== */
+
+/* C = A @ B^T: A[M,K], B[N,K], C[M,N] */
+void smol_matmul_t(float *C, const float *A, const float *B, int M, int K, int N);
+
+/* y = x @ W^T + b: x[seq,in], W[out,in], b[out], y[seq,out] */
+void smol_linear(float *y, const float *x, const float *W, const float *b,
+                 int seq_len, int in_dim, int out_dim);
+
+void smol_linear_nobias(float *y, const float *x, const float *W,
+                         int seq_len, int in_dim, int out_dim);
+
+/* bf16 weight variants */
+void smol_linear_bf16(float *y, const float *x, const uint16_t *W_bf16,
+                      const float *b, int seq_len, int in_dim, int out_dim);
+
+void smol_linear_nobias_bf16(float *y, const float *x, const uint16_t *W_bf16,
+                              int seq_len, int in_dim, int out_dim);
+
+/* seq=1 decoder fast path: compute Q/K/V matvecs with one threaded dispatch */
+void smol_linear_nobias_bf16_qkv(float *q, float *k, float *v, const float *x,
+                                 const uint16_t *Wq_bf16,
+                                 const uint16_t *Wk_bf16,
+                                 const uint16_t *Wv_bf16,
+                                 int in_dim, int q_dim, int kv_dim);
+
+void smol_matmul_t_bf16(float *C, const float *A, const uint16_t *B_bf16,
+                         int M, int K, int N);
+
+/* ========================================================================
+ * 2D Convolution
+ * ======================================================================== */
+
+void smol_conv2d(float *out, const float *in, const float *weight, const float *bias,
+                 int c_in, int c_out, int h_in, int w_in,
+                 int kh, int kw, int stride, int padding);
+
+/* ========================================================================
+ * Normalization
+ * ======================================================================== */
+
+void smol_layer_norm(float *out, const float *x, const float *weight, const float *bias,
+                     int seq_len, int hidden, float eps);
+
+void smol_rms_norm(float *out, const float *x, const float *weight,
+                   int seq_len, int hidden, float eps);
+
+void smol_rms_norm_per_head(float *x, const float *weight,
+                             int seq_len, int n_heads, int head_dim, float eps);
+
+/* ========================================================================
+ * Activation Functions
+ * ======================================================================== */
+
+void smol_silu(float *x, int n);
+void smol_gelu(float *x, int n);
+void smol_softmax(float *x, int rows, int cols);
+void smol_swiglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate);
+
+/* ========================================================================
+ * Attention Operations
+ * ======================================================================== */
+
+void smol_bidirectional_attention(float *out, const float *Q, const float *K,
+                                   const float *V, int seq, int n_heads,
+                                   int head_dim, float scale,
+                                   const int *window_starts, int n_windows);
+
+void smol_causal_attention(float *out, const float *Q, const float *K, const float *V,
+                            int seq_q, int seq_k, int n_heads, int n_kv_heads,
+                            int head_dim, float scale, int q_offset);
+
+/* ========================================================================
+ * Position Embeddings
+ * ======================================================================== */
+
+void smol_sinusoidal_pe(float *pe, int n_pos, int d_model);
+
+void smol_compute_rope_neox(float *cos_out, float *sin_out, const int *positions,
+                              int seq, int head_dim, float theta);
+
+void smol_apply_rope_neox(float *x, const float *cos_vals, const float *sin_vals,
+                            int seq, int n_heads, int head_dim);
+
+/* Streaming argmax: finds argmax(W_bf16 @ x) without materializing full logits. */
+int smol_argmax_matvec_bf16(const float *x, const uint16_t *W_bf16,
+                             int in_dim, int out_dim);
+
+/* ========================================================================
+ * Threading
+ * ======================================================================== */
+
+void smol_set_threads(int n);
+int smol_get_num_cpus(void);
+int smol_get_thread_count(void);
+
+/* Internal: parallel dispatch used by kernel implementations */
+void smol_parallel_for(void (*fn)(int tid, int n_threads, void *arg), void *arg);
+
+/* Global verbose flag */
+extern int smol_verbose;
+
+#endif /* SMOL_KERNELS_H */
