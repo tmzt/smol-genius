@@ -17,7 +17,6 @@
  */
 
 #include "nomic.h"
-#include "../../common/utils/tokenizer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
