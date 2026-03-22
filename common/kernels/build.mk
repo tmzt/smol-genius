@@ -14,20 +14,31 @@ LTO_SRCS += common/kernels/rope.c
 # Generic fallback (always compiled)
 LTO_SRCS += common/kernels/bf16_matvec_generic.c
 LTO_SRCS += common/kernels/vecops_generic.c
+LTO_SRCS += common/kernels/q4_dequant_generic.c
+LTO_SRCS += common/kernels/mean_pool_generic.c
+LTO_SRCS += common/kernels/q4_dispatch.c
 
 # Architecture-specific hot kernels
 ifeq ($(ARCH),neon)
     LTO_SRCS += common/kernels/bf16_matvec_neon.c
     LTO_SRCS += common/kernels/vecops_neon.c
+    LTO_SRCS += common/kernels/q4_dequant_neon.c
+    LTO_SRCS += common/kernels/mean_pool_neon.c
 else ifeq ($(ARCH),avx)
     LTO_SRCS += common/kernels/bf16_matvec_avx.c
     LTO_SRCS += common/kernels/vecops_avx.c
+    LTO_SRCS += common/kernels/q4_dequant_avx.c
+    LTO_SRCS += common/kernels/mean_pool_avx.c
 else
     # generic or auto-detect: compile all, let dispatch macros select
     LTO_SRCS += common/kernels/bf16_matvec_neon.c
     LTO_SRCS += common/kernels/vecops_neon.c
+    LTO_SRCS += common/kernels/q4_dequant_neon.c
+    LTO_SRCS += common/kernels/mean_pool_neon.c
     LTO_SRCS += common/kernels/bf16_matvec_avx.c
     LTO_SRCS += common/kernels/vecops_avx.c
+    LTO_SRCS += common/kernels/q4_dequant_avx.c
+    LTO_SRCS += common/kernels/mean_pool_avx.c
 endif
 
 # Test target

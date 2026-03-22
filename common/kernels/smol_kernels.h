@@ -136,6 +136,33 @@ int smol_argmax_matvec_bf16(const float *x, const uint16_t *W_bf16,
                              int in_dim, int out_dim);
 
 /* ========================================================================
+ * Q4 Dequantization
+ * ======================================================================== */
+
+/* Dequantize Q4 packed weights to f32.
+ * packed: [n/2] bytes, each holding two 4-bit weights
+ * scales_f16: [n/block_size] f16 per-block scales
+ * out: [n] f32 output
+ * Dequant: out[i] = (nibble_i - 8) * scale[i / block_size] */
+__attribute__((visibility("default")))
+void smol_dequantize_q4(float *out, const uint8_t *packed,
+                         const uint16_t *scales_f16, int n, int block_size);
+
+/* ========================================================================
+ * Mean Pooling
+ * ======================================================================== */
+
+/* Mean pool hidden states across the token dimension.
+ * hidden_states: [total_tokens, hidden] row-major
+ * seq_starts: [num_seqs] start index of each sequence
+ * seq_lens: [num_seqs] length of each sequence
+ * out: [num_seqs, hidden] output embeddings */
+__attribute__((visibility("default")))
+void smol_mean_pool(float *out, const float *hidden_states,
+                     const int *seq_starts, const int *seq_lens,
+                     int num_seqs, int hidden);
+
+/* ========================================================================
  * Threading
  * ======================================================================== */
 
