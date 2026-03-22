@@ -144,8 +144,16 @@ test: $(TEST_TARGETS)
 # Utilities
 # =====================================================================
 
+# Wakeword codebook compiler
+.PHONY: compile-wakewords
+compile-wakewords: tools/compile_wakewords
+	./tools/compile_wakewords
+
+tools/compile_wakewords: tools/compile_wakewords.c common/audio/audio.c common/audio/mfcc.c
+	$(CC) -O2 -o $@ $^ -Icommon/audio -Icommon/kernels -Icommon/utils -lm
+
 clean:
-	rm -f $(ALL_OBJS) $(ALL_DEPS) libsmol.a test_math
+	rm -f $(ALL_OBJS) $(ALL_DEPS) libsmol.a test_math tools/compile_wakewords
 	find . \( -name '*.o' -o -name '*.d' \) -delete
 
 info:

@@ -16,3 +16,5 @@ __pycache__/
 samples/extra
 Qwen3-ASR
 TODO.md
+wakewords/
+tools/compile_wakewords
