@@ -84,6 +84,9 @@ ifdef ENABLE_VISION
   CFLAGS += -Icommon/vision
   include common/vision/build.mk
 endif
+ifdef ENABLE_DECODER
+  include common/decoder/build.mk
+endif
 
 # =====================================================================
 # Build rules
