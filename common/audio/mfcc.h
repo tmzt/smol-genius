@@ -144,6 +144,16 @@ typedef struct {
     int                 audio_pos;
     int                 audio_count;
     int                 hop_count;
+
+    /* Sustained energy counter for prefix gating */
+    int                 energy_run;
+
+    /* Adaptive RMS gate — calibrated from ambient noise floor */
+    float               ambient_rms;       /* measured ambient RMS (0 = not calibrated) */
+    float               rms_gate;          /* gate = ambient_rms * multiplier */
+    int                 calibrating;       /* 1 = collecting ambient frames */
+    float               calib_rms_sum;
+    int                 calib_frames;
 } smol_ww_detector_t;
 
 /* ========================================================================
@@ -224,5 +234,16 @@ void smol_ww_reset(smol_ww_detector_t *det);
 
 __attribute__((visibility("default")))
 void smol_ww_activate(smol_ww_detector_t *det);
+
+/* Start ambient noise calibration. Feed audio via smol_ww_process for ~0.5s,
+ * then call smol_ww_calibrate_finish to set the adaptive RMS gate.
+ * While calibrating, detection is suppressed. */
+__attribute__((visibility("default")))
+void smol_ww_calibrate_start(smol_ww_detector_t *det);
+
+/* Finish calibration: compute ambient RMS from collected frames and set
+ * the gate to ambient_rms * multiplier. Returns the computed ambient RMS. */
+__attribute__((visibility("default")))
+float smol_ww_calibrate_finish(smol_ww_detector_t *det, float multiplier);
 
 #endif /* SMOL_MFCC_H */

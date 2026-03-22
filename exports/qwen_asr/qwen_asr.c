@@ -1139,6 +1139,10 @@ static int stream_reanchor_text_state(qwen_ctx_t *ctx,
 #define QWEN_STREAM_RESET_INTERVAL_CHUNKS 45
 #define QWEN_STREAM_RESET_CARRY_TOKENS    24
 
+/* Forward declarations — needed by stream_impl for control checking */
+static qwen_control_action_t take_control(qwen_ctx_t *ctx);
+static void set_state(qwen_ctx_t *ctx, qwen_pipeline_state_t state);
+
 static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                           qwen_live_audio_t *live) {
     int dim = ctx->dec_config.dec_hidden;
@@ -1326,6 +1330,15 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
             audio_samples = local_samples;
             audio_n_samples = local_base_sample + local_n_samples;
             ctx->perf_audio_ms = 1000.0 * (double)audio_n_samples / (double)QWEN_SAMPLE_RATE;
+
+            /* Check for stop command — sets live_eof to trigger natural exit */
+            {
+                qwen_control_action_t ctl = take_control(ctx);
+                if (ctl == QWEN_CONTROL_STOP_LISTENING ||
+                    ctl == QWEN_CONTROL_STOP_AND_CLEAR) {
+                    live_eof = 1;
+                }
+            }
         }
 
         double chunk_t0 = get_time_ms();
@@ -1857,13 +1870,37 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
     const int ww_hop = 160; /* 10ms at 16kHz */
     float ww_buf[160];
 
-    for (;;) {
-        /* ---- Wakeword gate (when detector is loaded) ---- */
-        if (ctx->wakeword) {
-            set_state(ctx, QWEN_PIPELINE_IDLE);
+    /* Calibrate ambient noise floor before entering wakeword gate.
+     * Feed ~500ms of audio through the detector in calibration mode,
+     * then set the RMS gate to 3x ambient. */
+    if (ctx->wakeword) {
+        smol_ww_calibrate_start(ctx->wakeword);
+        const int calib_hops = 50; /* ~500ms at 16kHz */
+        for (int i = 0; i < calib_hops; i++) {
+            pthread_mutex_lock(&live->mutex);
+            while (live->n_samples < ww_hop)
+                pthread_cond_wait(&live->cond, &live->mutex);
+            /* Feed through detector (calibration mode collects RMS) */
+            float calib_buf[160];
+            memcpy(calib_buf, live->samples, ww_hop * sizeof(float));
+            live->n_samples -= ww_hop;
+            if (live->n_samples > 0)
+                memmove(live->samples, live->samples + ww_hop,
+                        (size_t)live->n_samples * sizeof(float));
+            live->sample_offset += ww_hop;
+            pthread_mutex_unlock(&live->mutex);
+            smol_ww_process(ctx->wakeword, calib_buf, ww_hop);
+        }
+        smol_ww_calibrate_finish(ctx->wakeword, 3.0f);
+    }
 
+    for (;;) {
+        set_state(ctx, QWEN_PIPELINE_IDLE);
+
+        /* ---- Idle gate: wait for wakeword or START_LISTENING command ---- */
+        if (ctx->wakeword) {
+            /* Wakeword-gated: process audio hops through detector */
             for (;;) {
-                /* Check for external control */
                 qwen_control_action_t ctl = take_control(ctx);
                 if (ctl == QWEN_CONTROL_START_LISTENING) {
                     smol_ww_activate(ctx->wakeword);
@@ -1871,19 +1908,12 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
                 }
                 if (ctl == QWEN_CONTROL_STOP_AND_CLEAR) {
                     smol_ww_reset(ctx->wakeword);
-                    set_state(ctx, QWEN_PIPELINE_IDLE);
                 }
 
                 /* Wait for audio */
                 pthread_mutex_lock(&live->mutex);
-                while (live->n_samples < ww_hop && !live->eof)
+                while (live->n_samples < ww_hop)
                     pthread_cond_wait(&live->cond, &live->mutex);
-
-                if (live->eof && live->n_samples == 0) {
-                    live->eof = 0;
-                    pthread_mutex_unlock(&live->mutex);
-                    continue;
-                }
 
                 /* Drain audio in hops through the wakeword detector */
                 while (live->n_samples >= ww_hop) {
@@ -1904,27 +1934,37 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
                     }
 
                     if (ww == SMOL_WW_LISTENING)
-                        goto wakeword_triggered;
+                        goto gate_open;
 
                     pthread_mutex_lock(&live->mutex);
                 }
                 pthread_mutex_unlock(&live->mutex);
             }
+        } else {
+            /* No wakeword: idle, drop audio, wait for START_LISTENING */
+            for (;;) {
+                qwen_control_action_t ctl = take_control(ctx);
+                if (ctl == QWEN_CONTROL_START_LISTENING)
+                    break;
+
+                /* Drain and discard audio so LiveAudio doesn't grow unbounded */
+                pthread_mutex_lock(&live->mutex);
+                while (live->n_samples == 0 && !live->eof)
+                    pthread_cond_wait(&live->cond, &live->mutex);
+                live->sample_offset += live->n_samples;
+                live->n_samples = 0;
+                pthread_mutex_unlock(&live->mutex);
+            }
         }
-wakeword_triggered:
+gate_open:
 
         set_state(ctx, QWEN_PIPELINE_LISTENING);
 
-        /* ---- Wait for audio data ---- */
+        /* Reset LiveAudio cursor so stream_impl starts from a clean base.
+         * Any buffered audio from wakeword detection is stale — drop it. */
         pthread_mutex_lock(&live->mutex);
-        while (live->n_samples == 0 && !live->eof)
-            pthread_cond_wait(&live->cond, &live->mutex);
-        if (live->eof && live->n_samples == 0) {
-            live->eof = 0;
-            pthread_mutex_unlock(&live->mutex);
-            set_state(ctx, QWEN_PIPELINE_IDLE);
-            continue;
-        }
+        live->n_samples = 0;
+        live->sample_offset = 0;
         pthread_mutex_unlock(&live->mutex);
 
         /* ---- ASR session ---- */
@@ -1934,12 +1974,6 @@ wakeword_triggered:
         set_state(ctx, QWEN_PIPELINE_PROCESSING);
 
         qkn_kv_cache_reset(&ctx->dec_ctx);
-
-        pthread_mutex_lock(&live->mutex);
-        live->n_samples = 0;
-        live->sample_offset = 0;
-        live->eof = 0;
-        pthread_mutex_unlock(&live->mutex);
 
         /* Session boundary marker */
         if (ctx->token_cb)
@@ -2029,4 +2063,5 @@ qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx) {
     return (qwen_pipeline_state_t)atomic_load_explicit(
         (_Atomic uint32_t *)&ctx->pipeline_state, memory_order_acquire);
 }
+
 

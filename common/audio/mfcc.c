@@ -240,7 +240,10 @@ static float segment_cosine_sim(const float *ring, const float *ring_norms,
         matched++;
     }
 
-    return matched > 0 ? sum / (float)matched : 0.0f;
+    /* Require at least 80% of frames to have real energy on both sides.
+     * Otherwise the score is unreliable (too few frames voted). */
+    if (matched < seg_len * 4 / 5) return 0.0f;
+    return sum / (float)matched;
 }
 
 /* Match a phrase's segments against the ring buffer.
@@ -280,8 +283,8 @@ static float match_phrase_segments(const smol_ww_detector_t *det,
  * ======================================================================== */
 
 void smol_ww_config_default(smol_ww_config_t *cfg) {
-    cfg->threshold = 0.80f;
-    cfg->prefix_threshold = 0.72f;
+    cfg->threshold = 0.88f;
+    cfg->prefix_threshold = 0.92f;
     cfg->confirm_frames = 100;   /* 1s */
     cfg->listen_frames = 500;    /* 5s */
     cfg->silence_frames = 200;   /* 2s */
@@ -645,6 +648,12 @@ static void process_one_frame(smol_ww_detector_t *det, const float *mfcc_frame) 
     case SMOL_WW_WAITING: {
         if (det->n_phrases == 0 || det->n_segments == 0) break;
 
+        /* Require sustained energy before attempting prefix match.
+         * A breath puff is typically < 40 frames; speech is longer. */
+        if (!has_energy) { det->energy_run = 0; break; }
+        det->energy_run++;
+        if (det->energy_run < 15) break; /* ~150ms of sustained energy */
+
         /* Stage 1: check prefix segments of each phrase */
         for (int p = 0; p < det->n_phrases; p++) {
             smol_ww_phrase_t *phrase = &det->phrases[p];
@@ -652,6 +661,13 @@ static void process_one_frame(smol_ww_detector_t *det, const float *mfcc_frame) 
 
             float sim = match_phrase_segments(det, phrase,
                                               phrase->n_prefix_segs, 0);
+            if (sim >= det->config.prefix_threshold * 0.8f) {
+                fprintf(stderr, "[ww] prefix p%d: sim=%.4f thresh=%.4f energy=%.1f ring=%d/%d pfx_frames=%d total_frames=%d segs=%d/%d%s\n",
+                        p, sim, det->config.prefix_threshold, energy, det->ring_len, det->ring_cap,
+                        phrase->prefix_frames, phrase->total_frames,
+                        phrase->n_prefix_segs, phrase->n_segs,
+                        sim >= det->config.prefix_threshold ? " ** MATCH **" : "");
+            }
             if (sim >= det->config.prefix_threshold) {
                 det->state = SMOL_WW_PREFIX_DETECTED;
                 det->matched_phrase = p;
@@ -665,6 +681,7 @@ static void process_one_frame(smol_ww_detector_t *det, const float *mfcc_frame) 
     case SMOL_WW_PREFIX_DETECTED: {
         det->confirm_remaining--;
         if (det->confirm_remaining <= 0) {
+            fprintf(stderr, "[ww] confirm timeout p%d\n", det->matched_phrase);
             det->state = SMOL_WW_WAITING;
             return;
         }
@@ -674,7 +691,10 @@ static void process_one_frame(smol_ww_detector_t *det, const float *mfcc_frame) 
         if (phrase->total_frames > det->ring_len) break;
 
         float sim = match_phrase_segments(det, phrase, phrase->n_segs, 0);
+        fprintf(stderr, "[ww] confirm p%d: sim=%.4f thresh=%.4f remain=%d\n",
+                det->matched_phrase, sim, det->config.threshold, det->confirm_remaining);
         if (sim >= det->config.threshold) {
+            fprintf(stderr, "[ww] ** TRIGGERED ** p%d sim=%.4f\n", det->matched_phrase, sim);
             det->state = SMOL_WW_LISTENING;
             det->listen_remaining = det->config.listen_frames;
             det->silence_count = 0;
@@ -726,7 +746,27 @@ smol_ww_state_t smol_ww_process(smol_ww_detector_t *det,
                 memcpy(window + first, det->audio_buf, (SMOL_MFCC_WIN - first) * sizeof(float));
             }
 
-            smol_mfcc_compute(det->mfcc, window, mfcc_out);
+            /* RMS gate: suppress MFCC for frames at or below ambient noise floor.
+             * Push zero vectors so cosine sim drags to 0.0 for quiet audio. */
+            float rms = 0.0f;
+            for (int r = 0; r < SMOL_MFCC_WIN; r++) rms += window[r] * window[r];
+            rms = sqrtf(rms / SMOL_MFCC_WIN);
+
+            /* During calibration, accumulate RMS and suppress detection */
+            if (det->calibrating) {
+                det->calib_rms_sum += rms;
+                det->calib_frames++;
+                memset(mfcc_out, 0, det->n_coeffs * sizeof(float));
+                process_one_frame(det, mfcc_out);
+                continue;
+            }
+
+            float gate = det->rms_gate > 0.0f ? det->rms_gate : 0.005f;
+            if (rms < gate) {
+                memset(mfcc_out, 0, det->n_coeffs * sizeof(float));
+            } else {
+                smol_mfcc_compute(det->mfcc, window, mfcc_out);
+            }
             process_one_frame(det, mfcc_out);
         }
     }
@@ -751,4 +791,27 @@ void smol_ww_activate(smol_ww_detector_t *det) {
     det->state = SMOL_WW_LISTENING;
     det->listen_remaining = det->config.listen_frames;
     det->silence_count = 0;
+}
+
+void smol_ww_calibrate_start(smol_ww_detector_t *det) {
+    if (!det) return;
+    det->calibrating = 1;
+    det->calib_rms_sum = 0.0f;
+    det->calib_frames = 0;
+}
+
+float smol_ww_calibrate_finish(smol_ww_detector_t *det, float multiplier) {
+    if (!det || det->calib_frames == 0) return 0.0f;
+    det->calibrating = 0;
+    det->ambient_rms = det->calib_rms_sum / (float)det->calib_frames;
+    det->rms_gate = det->ambient_rms * multiplier;
+    fprintf(stderr, "[ww] calibrated: ambient_rms=%.6f gate=%.6f (%.1fx)\n",
+            det->ambient_rms, det->rms_gate, multiplier);
+    /* Reset ring buffer and state — calibration audio is not valid for matching */
+    det->ring_len = 0;
+    det->ring_pos = 0;
+    det->state = SMOL_WW_WAITING;
+    det->confirm_remaining = 0;
+    det->silence_count = 0;
+    return det->ambient_rms;
 }

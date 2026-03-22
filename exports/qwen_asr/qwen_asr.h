@@ -214,6 +214,7 @@ void qwen_post_control(qwen_ctx_t *ctx, qwen_control_action_t action);
 __attribute__((visibility("default")))
 qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx);
 
+
 /* ========================================================================
  * Globals
  * ======================================================================== */
