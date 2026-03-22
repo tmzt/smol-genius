@@ -80,6 +80,10 @@ ifdef ENABLE_AUDIO
   CFLAGS += -Icommon/audio
   include common/audio/build.mk
 endif
+ifdef ENABLE_VISION
+  CFLAGS += -Icommon/vision
+  include common/vision/build.mk
+endif
 
 # =====================================================================
 # Build rules
@@ -108,6 +112,7 @@ help:
 	@echo "  make lib MODEL=gemma        - Include Gemma decoder export"
 	@echo "  make lib MODEL=nomic        - Include Nomic embedding export"
 	@echo "  make lib MODEL=qwen_asr     - Include Qwen ASR encoder export (implies audio)"
+	@echo "  make lib MODEL=smolvlm      - Include SmolVLM vision-language export (implies vision)"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make test                  - Run all test suites"
@@ -153,4 +158,7 @@ ifdef MODEL
 endif
 ifdef ENABLE_AUDIO
 	@echo "AUDIO:     enabled"
+endif
+ifdef ENABLE_VISION
+	@echo "VISION:    enabled"
 endif
