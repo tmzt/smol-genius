@@ -1,4 +1,6 @@
 *.o
+*.a
+test_math
 qwen_asr
 venv/
 venv312/
