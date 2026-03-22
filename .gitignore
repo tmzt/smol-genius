@@ -1,5 +1,9 @@
 *.o
 *.a
+*.dylib
+*.so
+*.bc
+*.lto.*
 test_math
 qwen_asr
 venv/
