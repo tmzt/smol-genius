@@ -327,6 +327,9 @@ void qwen_free(qwen_ctx_t *ctx) {
     free(ctx->dec_ctx.rope_cache_cos); free(ctx->dec_ctx.rope_cache_sin);
     free(ctx->dec_ctx.rope_inv_freq);
 
+    /* Wakeword detector */
+    if (ctx->wakeword) smol_ww_free(ctx->wakeword);
+
     /* Tokenizer */
     if (ctx->tokenizer) smol_tokenizer_free(ctx->tokenizer);
 
@@ -1838,20 +1841,97 @@ void qwen_set_stream_chunk_sec(qwen_ctx_t *ctx, float sec) {
     ctx->stream_chunk_sec = sec;
 }
 
+/* Consume pending control action (called from pipeline thread). */
+static qwen_control_action_t take_control(qwen_ctx_t *ctx) {
+    return (qwen_control_action_t)atomic_exchange_explicit(
+        &ctx->control_action, (uint32_t)QWEN_CONTROL_NONE,
+        memory_order_acquire);
+}
+
+static void set_state(qwen_ctx_t *ctx, qwen_pipeline_state_t state) {
+    atomic_store_explicit(&ctx->pipeline_state, (uint32_t)state,
+                          memory_order_release);
+}
+
 void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *live) {
+    const int ww_hop = 160; /* 10ms at 16kHz */
+    float ww_buf[160];
+
     for (;;) {
+        /* ---- Wakeword gate (when detector is loaded) ---- */
+        if (ctx->wakeword) {
+            set_state(ctx, QWEN_PIPELINE_IDLE);
+
+            for (;;) {
+                /* Check for external control */
+                qwen_control_action_t ctl = take_control(ctx);
+                if (ctl == QWEN_CONTROL_START_LISTENING) {
+                    smol_ww_activate(ctx->wakeword);
+                    break;
+                }
+                if (ctl == QWEN_CONTROL_STOP_AND_CLEAR) {
+                    smol_ww_reset(ctx->wakeword);
+                    set_state(ctx, QWEN_PIPELINE_IDLE);
+                }
+
+                /* Wait for audio */
+                pthread_mutex_lock(&live->mutex);
+                while (live->n_samples < ww_hop && !live->eof)
+                    pthread_cond_wait(&live->cond, &live->mutex);
+
+                if (live->eof && live->n_samples == 0) {
+                    live->eof = 0;
+                    pthread_mutex_unlock(&live->mutex);
+                    continue;
+                }
+
+                /* Drain audio in hops through the wakeword detector */
+                while (live->n_samples >= ww_hop) {
+                    memcpy(ww_buf, live->samples, ww_hop * sizeof(float));
+                    live->n_samples -= ww_hop;
+                    if (live->n_samples > 0) {
+                        memmove(live->samples, live->samples + ww_hop,
+                                (size_t)live->n_samples * sizeof(float));
+                    }
+                    live->sample_offset += ww_hop;
+                    pthread_mutex_unlock(&live->mutex);
+
+                    smol_ww_state_t ww = smol_ww_process(ctx->wakeword, ww_buf, ww_hop);
+                    if (ww == SMOL_WW_PREFIX_DETECTED) {
+                        set_state(ctx, QWEN_PIPELINE_PREFIX_DETECTED);
+                    } else if (ww == SMOL_WW_WAITING) {
+                        set_state(ctx, QWEN_PIPELINE_IDLE);
+                    }
+
+                    if (ww == SMOL_WW_LISTENING)
+                        goto wakeword_triggered;
+
+                    pthread_mutex_lock(&live->mutex);
+                }
+                pthread_mutex_unlock(&live->mutex);
+            }
+        }
+wakeword_triggered:
+
+        set_state(ctx, QWEN_PIPELINE_LISTENING);
+
+        /* ---- Wait for audio data ---- */
         pthread_mutex_lock(&live->mutex);
         while (live->n_samples == 0 && !live->eof)
             pthread_cond_wait(&live->cond, &live->mutex);
         if (live->eof && live->n_samples == 0) {
             live->eof = 0;
             pthread_mutex_unlock(&live->mutex);
+            set_state(ctx, QWEN_PIPELINE_IDLE);
             continue;
         }
         pthread_mutex_unlock(&live->mutex);
 
+        /* ---- ASR session ---- */
         char *result = stream_impl(ctx, NULL, 0, live);
         if (result) free(result);
+
+        set_state(ctx, QWEN_PIPELINE_PROCESSING);
 
         qkn_kv_cache_reset(&ctx->dec_ctx);
 
@@ -1861,8 +1941,13 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
         live->eof = 0;
         pthread_mutex_unlock(&live->mutex);
 
+        /* Session boundary marker */
         if (ctx->token_cb)
             ctx->token_cb(NULL, ctx->token_cb_userdata);
+
+        /* Reset wakeword for next session */
+        if (ctx->wakeword)
+            smol_ww_reset(ctx->wakeword);
     }
 }
 
@@ -1890,3 +1975,58 @@ char *qwen_transcribe_stdin(qwen_ctx_t *ctx) {
     free(samples);
     return text;
 }
+
+/* ========================================================================
+ * Wakeword Integration
+ * ======================================================================== */
+
+int qwen_load_wakeword(qwen_ctx_t *ctx, const char *codebook_path) {
+    if (!ctx || !codebook_path) return -1;
+    if (ctx->wakeword) { smol_ww_free(ctx->wakeword); ctx->wakeword = NULL; }
+
+    smol_ww_config_t cfg;
+    smol_ww_config_default(&cfg);
+    ctx->wakeword = smol_ww_create(13, &cfg);
+    if (!ctx->wakeword) return -1;
+
+    if (smol_ww_load(ctx->wakeword, codebook_path) != 0) {
+        smol_ww_free(ctx->wakeword);
+        ctx->wakeword = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+int qwen_load_wakeword_bytes(qwen_ctx_t *ctx, const uint8_t *data, size_t size) {
+    if (!ctx || !data || size == 0) return -1;
+    if (ctx->wakeword) { smol_ww_free(ctx->wakeword); ctx->wakeword = NULL; }
+
+    smol_ww_config_t cfg;
+    smol_ww_config_default(&cfg);
+    ctx->wakeword = smol_ww_create(13, &cfg);
+    if (!ctx->wakeword) return -1;
+
+    if (smol_ww_load_bytes(ctx->wakeword, data, size) != 0) {
+        smol_ww_free(ctx->wakeword);
+        ctx->wakeword = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+/* ========================================================================
+ * Pipeline Control
+ * ======================================================================== */
+
+void qwen_post_control(qwen_ctx_t *ctx, qwen_control_action_t action) {
+    if (!ctx) return;
+    atomic_store_explicit(&ctx->control_action, (uint32_t)action,
+                          memory_order_release);
+}
+
+qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx) {
+    if (!ctx) return QWEN_PIPELINE_IDLE;
+    return (qwen_pipeline_state_t)atomic_load_explicit(
+        (_Atomic uint32_t *)&ctx->pipeline_state, memory_order_acquire);
+}
+

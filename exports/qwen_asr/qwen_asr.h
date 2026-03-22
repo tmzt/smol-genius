@@ -13,11 +13,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include "encoder.h"
 #include "../../common/decoder/qkn_decoder.h"
 #include "../../common/utils/tokenizer.h"
 #include "../../common/audio/audio.h"
+#include "../../common/audio/mfcc.h"
 
 /* ========================================================================
  * Constants
@@ -42,10 +44,29 @@
 #define QWEN_CONV_HIDDEN      480
 
 /* ========================================================================
- * Token Callback (streaming output)
+ * Callbacks
  * ======================================================================== */
 
+/* Token callback: each decoded text token during generation. */
 typedef void (*qwen_token_cb)(const char *piece, void *userdata);
+
+/* ========================================================================
+ * Pipeline Control (atomic, cross-thread)
+ * ======================================================================== */
+
+typedef enum {
+    QWEN_PIPELINE_IDLE           = 0,  /* wakeword-gated, dropping audio */
+    QWEN_PIPELINE_PREFIX_DETECTED = 1, /* prefix matched, confirming */
+    QWEN_PIPELINE_LISTENING      = 2,  /* gate open, ASR active */
+    QWEN_PIPELINE_PROCESSING     = 3,  /* finalizing ASR result */
+} qwen_pipeline_state_t;
+
+typedef enum {
+    QWEN_CONTROL_NONE            = 0,
+    QWEN_CONTROL_START_LISTENING = 1,  /* bypass wakeword, open gate */
+    QWEN_CONTROL_STOP_LISTENING  = 2,  /* close gate, return to idle */
+    QWEN_CONTROL_STOP_AND_CLEAR  = 3,  /* close gate + clear text */
+} qwen_control_action_t;
 
 /* ========================================================================
  * Live Audio — type alias for smol_live_audio_t
@@ -95,6 +116,13 @@ typedef struct {
     int *force_prompt_tokens;      /* cached token ids for "language X" + <asr_text> */
     int n_force_prompt_tokens;
     int prompt_tokens_ready;       /* cache valid flag */
+
+    /* Wakeword detector (optional — NULL if disabled) */
+    smol_ww_detector_t *wakeword;
+
+    /* Pipeline state (atomic, cross-thread safe) */
+    _Atomic uint32_t pipeline_state;   /* qwen_pipeline_state_t */
+    _Atomic uint32_t control_action;   /* qwen_control_action_t */
 
     /* Per-run performance stats */
     double perf_total_ms;
@@ -160,13 +188,39 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
 __attribute__((visibility("default")))
 void qwen_set_stream_chunk_sec(qwen_ctx_t *ctx, float sec);
 
-/* Global verbose flag */
-extern int qwen_verbose;
+/* ========================================================================
+ * Wakeword Integration (optional — all NULL/no-op by default)
+ * ======================================================================== */
 
-/* Monitor mode: show inline Unicode symbols on stderr for streaming diagnostics. */
+/* Load a wakeword codebook. Enables wakeword gating in persistent mode.
+ * Pass NULL to disable. Returns 0 on success. */
+__attribute__((visibility("default")))
+int qwen_load_wakeword(qwen_ctx_t *ctx, const char *codebook_path);
+
+/* Load wakeword codebook from raw bytes (e.g. embedded binary). */
+__attribute__((visibility("default")))
+int qwen_load_wakeword_bytes(qwen_ctx_t *ctx, const uint8_t *data, size_t size);
+
+/* ========================================================================
+ * Pipeline Control (cross-thread safe, for use with persistent mode)
+ * ======================================================================== */
+
+/* Post a control action (caller thread — UI, system, etc.).
+ * Latest wins (single atomic, swap-to-consume). */
+__attribute__((visibility("default")))
+void qwen_post_control(qwen_ctx_t *ctx, qwen_control_action_t action);
+
+/* Read current pipeline state (caller thread). */
+__attribute__((visibility("default")))
+qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx);
+
+/* ========================================================================
+ * Globals
+ * ======================================================================== */
+
+extern int qwen_verbose;
 extern int qwen_monitor;
 
-/* Thread count control */
 __attribute__((visibility("default")))
 void qwen_set_threads(int n);
 
