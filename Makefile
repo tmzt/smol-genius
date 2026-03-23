@@ -149,8 +149,8 @@ test: $(TEST_TARGETS)
 compile-wakewords: tools/compile_wakewords
 	./tools/compile_wakewords
 
-tools/compile_wakewords: tools/compile_wakewords.c common/audio/audio.c common/audio/mfcc.c
-	$(CC) -O2 -o $@ $^ -Icommon/audio -Icommon/kernels -Icommon/utils -lm
+tools/compile_wakewords: tools/compile_wakewords.c libsmol.a
+	$(CC) -O2 -o $@ $< -Icommon/audio -Icommon/kernels -Icommon/utils -Iexports/qwen_asr -Icommon/decoder -L. -lsmol -framework Accelerate -lm -lpthread
 
 clean:
 	rm -f $(ALL_OBJS) $(ALL_DEPS) libsmol.a test_math tools/compile_wakewords

@@ -1866,76 +1866,148 @@ static void set_state(qwen_ctx_t *ctx, qwen_pipeline_state_t state) {
                           memory_order_release);
 }
 
-void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *live) {
-    const int ww_hop = 160; /* 10ms at 16kHz */
-    float ww_buf[160];
-
-    /* Calibrate ambient noise floor before entering wakeword gate.
-     * Feed ~500ms of audio through the detector in calibration mode,
-     * then set the RMS gate to 3x ambient. */
-    if (ctx->wakeword) {
-        smol_ww_calibrate_start(ctx->wakeword);
-        const int calib_hops = 50; /* ~500ms at 16kHz */
-        for (int i = 0; i < calib_hops; i++) {
-            pthread_mutex_lock(&live->mutex);
-            while (live->n_samples < ww_hop)
-                pthread_cond_wait(&live->cond, &live->mutex);
-            /* Feed through detector (calibration mode collects RMS) */
-            float calib_buf[160];
-            memcpy(calib_buf, live->samples, ww_hop * sizeof(float));
-            live->n_samples -= ww_hop;
-            if (live->n_samples > 0)
-                memmove(live->samples, live->samples + ww_hop,
-                        (size_t)live->n_samples * sizeof(float));
-            live->sample_offset += ww_hop;
-            pthread_mutex_unlock(&live->mutex);
-            smol_ww_process(ctx->wakeword, calib_buf, ww_hop);
-        }
-        smol_ww_calibrate_finish(ctx->wakeword, 3.0f);
+static float ww_cosine_sim(const float *a, const float *b, int dim) {
+    float dot = 0.0f, na = 0.0f, nb = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
     }
+    float denom = sqrtf(na) * sqrtf(nb);
+    return denom > 1e-12f ? dot / denom : 0.0f;
+}
+
+/* Drain up to `need` samples from live into buf starting at buf_pos.
+ * Returns number of samples actually taken. Blocks if no audio available. */
+static int drain_live_audio(qwen_live_audio_t *live, float *buf,
+                             int buf_pos, int need) {
+    pthread_mutex_lock(&live->mutex);
+    while (live->n_samples == 0 && !live->eof)
+        pthread_cond_wait(&live->cond, &live->mutex);
+    int avail = (int)live->n_samples;
+    int take = avail < need ? avail : need;
+    if (take > 0) {
+        memcpy(buf + buf_pos, live->samples, take * sizeof(float));
+        live->n_samples -= take;
+        if (live->n_samples > 0)
+            memmove(live->samples, live->samples + take,
+                    (size_t)live->n_samples * sizeof(float));
+        live->sample_offset += take;
+    }
+    pthread_mutex_unlock(&live->mutex);
+    return take;
+}
+
+void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *live) {
+    int use_enc_ww = (ctx->ww_enc_ref != NULL && ctx->ww_enc_dim > 0);
 
     for (;;) {
         set_state(ctx, QWEN_PIPELINE_IDLE);
 
         /* ---- Idle gate: wait for wakeword or START_LISTENING command ---- */
-        if (ctx->wakeword) {
-            /* Wakeword-gated: process audio hops through detector */
-            for (;;) {
+        if (use_enc_ww) {
+            /* Encoder-based wakeword: accumulate 1s windows, run encoder,
+             * compare embeddings against references. */
+            const int ww_window = 16000;     /* 1 second at 16kHz */
+            const int ww_stride = 8000;      /* 0.5s slide */
+            float *ww_buf = (float *)calloc(ww_window, sizeof(float));
+            int ww_pos = 0;
+            int triggered = 0;
+
+            while (!triggered) {
                 qwen_control_action_t ctl = take_control(ctx);
                 if (ctl == QWEN_CONTROL_START_LISTENING) {
-                    smol_ww_activate(ctx->wakeword);
+                    triggered = 1;
                     break;
                 }
-                if (ctl == QWEN_CONTROL_STOP_AND_CLEAR) {
-                    smol_ww_reset(ctx->wakeword);
+
+                int need = ww_window - ww_pos;
+                int got = drain_live_audio(live, ww_buf, ww_pos, need);
+                ww_pos += got;
+                if (ww_pos < ww_window) continue;
+
+                /* Full window — compute mel + encoder */
+                int mel_frames = 0;
+                float *mel = smol_mel_spectrogram(ww_buf, ww_window, &mel_frames);
+                if (!mel) { ww_pos = 0; continue; }
+
+                int seq_len = 0;
+                float *enc = qwen_asr_encoder_forward(&ctx->encoder, &ctx->enc_config,
+                                                       mel, mel_frames, &seq_len);
+                free(mel);
+                if (!enc || seq_len == 0) { free(enc); ww_pos = 0; continue; }
+
+                /* Mean-pool encoder output → [dim] */
+                int dim = ctx->ww_enc_dim;
+                float *pool = (float *)calloc(dim, sizeof(float));
+                for (int t = 0; t < seq_len; t++)
+                    for (int d = 0; d < dim; d++)
+                        pool[d] += enc[t * dim + d];
+                for (int d = 0; d < dim; d++) pool[d] /= (float)seq_len;
+                free(enc);
+
+                /* Check against each reference phrase */
+                float best_sim = 0.0f;
+                int best_p = -1;
+                for (int p = 0; p < ctx->ww_enc_n_phrases; p++) {
+                    float sim = ww_cosine_sim(pool, ctx->ww_enc_ref + p * dim, dim);
+                    if (sim > best_sim) { best_sim = sim; best_p = p; }
+                }
+                free(pool);
+
+                fprintf(stderr, "[ww-enc] best p%d sim=%.4f thresh=%.4f\n",
+                        best_p, best_sim, ctx->ww_enc_threshold);
+
+                if (best_sim >= ctx->ww_enc_threshold) {
+                    fprintf(stderr, "[ww-enc] ** TRIGGERED ** p%d sim=%.4f\n",
+                            best_p, best_sim);
+                    triggered = 1;
                 }
 
-                /* Wait for audio */
+                /* Slide window */
+                if (!triggered) {
+                    int keep = ww_window - ww_stride;
+                    memmove(ww_buf, ww_buf + ww_stride, keep * sizeof(float));
+                    ww_pos = keep;
+                }
+            }
+            free(ww_buf);
+
+        } else if (ctx->wakeword) {
+            /* MFCC-based wakeword (legacy fallback) */
+            const int ww_hop = 160;
+            float ww_buf[160];
+
+            if (ctx->wakeword) {
+                smol_ww_calibrate_start(ctx->wakeword);
+                const int calib_hops = 50;
+                for (int i = 0; i < calib_hops; i++) {
+                    float calib_buf[160];
+                    drain_live_audio(live, calib_buf, 0, ww_hop);
+                    smol_ww_process(ctx->wakeword, calib_buf, ww_hop);
+                }
+                smol_ww_calibrate_finish(ctx->wakeword, 3.0f);
+            }
+
+            for (;;) {
+                qwen_control_action_t ctl = take_control(ctx);
+                if (ctl == QWEN_CONTROL_START_LISTENING) break;
+
                 pthread_mutex_lock(&live->mutex);
                 while (live->n_samples < ww_hop)
                     pthread_cond_wait(&live->cond, &live->mutex);
 
-                /* Drain audio in hops through the wakeword detector */
                 while (live->n_samples >= ww_hop) {
                     memcpy(ww_buf, live->samples, ww_hop * sizeof(float));
                     live->n_samples -= ww_hop;
-                    if (live->n_samples > 0) {
+                    if (live->n_samples > 0)
                         memmove(live->samples, live->samples + ww_hop,
                                 (size_t)live->n_samples * sizeof(float));
-                    }
                     live->sample_offset += ww_hop;
                     pthread_mutex_unlock(&live->mutex);
 
                     smol_ww_state_t ww = smol_ww_process(ctx->wakeword, ww_buf, ww_hop);
-                    if (ww == SMOL_WW_PREFIX_DETECTED) {
-                        set_state(ctx, QWEN_PIPELINE_PREFIX_DETECTED);
-                    } else if (ww == SMOL_WW_WAITING) {
-                        set_state(ctx, QWEN_PIPELINE_IDLE);
-                    }
-
-                    if (ww == SMOL_WW_LISTENING)
-                        goto gate_open;
-
+                    if (ww == SMOL_WW_LISTENING) goto gate_open;
                     pthread_mutex_lock(&live->mutex);
                 }
                 pthread_mutex_unlock(&live->mutex);
@@ -1944,10 +2016,8 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
             /* No wakeword: idle, drop audio, wait for START_LISTENING */
             for (;;) {
                 qwen_control_action_t ctl = take_control(ctx);
-                if (ctl == QWEN_CONTROL_START_LISTENING)
-                    break;
+                if (ctl == QWEN_CONTROL_START_LISTENING) break;
 
-                /* Drain and discard audio so LiveAudio doesn't grow unbounded */
                 pthread_mutex_lock(&live->mutex);
                 while (live->n_samples == 0 && !live->eof)
                     pthread_cond_wait(&live->cond, &live->mutex);
@@ -2045,6 +2115,32 @@ int qwen_load_wakeword_bytes(qwen_ctx_t *ctx, const uint8_t *data, size_t size) 
         ctx->wakeword = NULL;
         return -1;
     }
+    return 0;
+}
+
+#define QWEN_WW_ENC_MAGIC 0x4B575745  /* 'EWWK' */
+
+int qwen_load_wakeword_enc_bytes(qwen_ctx_t *ctx, const uint8_t *data, size_t size) {
+    if (!ctx || !data || size < 12) return -1;
+
+    const uint32_t *hdr = (const uint32_t *)data;
+    if (hdr[0] != QWEN_WW_ENC_MAGIC) return -1;
+
+    int dim = (int)hdr[1];
+    int n_phrases = (int)hdr[2];
+    size_t expected = 12 + (size_t)n_phrases * dim * sizeof(float);
+    if (size < expected || dim <= 0 || n_phrases <= 0) return -1;
+
+    if (ctx->ww_enc_ref) { free(ctx->ww_enc_ref); ctx->ww_enc_ref = NULL; }
+
+    ctx->ww_enc_dim = dim;
+    ctx->ww_enc_n_phrases = n_phrases;
+    ctx->ww_enc_ref = (float *)malloc(n_phrases * dim * sizeof(float));
+    if (!ctx->ww_enc_ref) return -1;
+    memcpy(ctx->ww_enc_ref, data + 12, n_phrases * dim * sizeof(float));
+    ctx->ww_enc_threshold = 0.70f;
+
+    fprintf(stderr, "[ww-enc] loaded %d reference phrase(s), dim=%d\n", n_phrases, dim);
     return 0;
 }
 

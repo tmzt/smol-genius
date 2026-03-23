@@ -120,6 +120,12 @@ typedef struct {
     /* Wakeword detector (optional — NULL if disabled) */
     smol_ww_detector_t *wakeword;
 
+    /* Encoder-based wakeword reference embeddings (optional) */
+    float *ww_enc_ref;         /* [ww_enc_n_phrases * ww_enc_dim] */
+    int    ww_enc_dim;         /* encoder output_dim */
+    int    ww_enc_n_phrases;   /* number of reference phrases */
+    float  ww_enc_threshold;   /* cosine sim threshold (default 0.85) */
+
     /* Pipeline state (atomic, cross-thread safe) */
     _Atomic uint32_t pipeline_state;   /* qwen_pipeline_state_t */
     _Atomic uint32_t control_action;   /* qwen_control_action_t */
@@ -200,6 +206,12 @@ int qwen_load_wakeword(qwen_ctx_t *ctx, const char *codebook_path);
 /* Load wakeword codebook from raw bytes (e.g. embedded binary). */
 __attribute__((visibility("default")))
 int qwen_load_wakeword_bytes(qwen_ctx_t *ctx, const uint8_t *data, size_t size);
+
+/* Load encoder-based wakeword reference embeddings from raw bytes.
+ * Format: u32 magic 'EWWK', u32 dim, u32 n_phrases, then
+ * n_phrases * dim floats. Returns 0 on success. */
+__attribute__((visibility("default")))
+int qwen_load_wakeword_enc_bytes(qwen_ctx_t *ctx, const uint8_t *data, size_t size);
 
 /* ========================================================================
  * Pipeline Control (cross-thread safe, for use with persistent mode)
