@@ -450,8 +450,10 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
 
     int pos = ctx->kv_cache_len;
 
-    /* Grow KV cache if needed */
-    if (pos >= ctx->kv_cache_max) {
+    /* Init or grow KV cache if needed */
+    if (!ctx->kv_cache_k) {
+        if (kv_cache_init(ctx, pos + 1024) != 0) return SMOL_TOKEN_IM_END;
+    } else if (pos >= ctx->kv_cache_max) {
         if (kv_cache_grow(ctx, pos + 1024) != 0) return SMOL_TOKEN_IM_END;
     }
 

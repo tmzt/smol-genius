@@ -13,8 +13,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 int gemma_verbose = 0;
+
+/* Thread pool (from common/kernels/threading.c) */
+extern void smol_set_threads(int n);
+extern int smol_get_thread_count(void);
+extern int smol_get_num_cpus(void);
 
 /* ========================================================================
  * Context
@@ -134,10 +140,42 @@ gemma_ctx_t *gemma_load(const char *model_dir) {
     ctx->eos_token = 106;
     ctx->bos_token = 2;
 
+    /* Gemma convention: RMSNorm uses (1 + weight) instead of weight.
+     * Add 1.0 to all loaded norm weights so the standard kernel works. */
+    {
+        int dim = ctx->config.dec_hidden;
+        int hdim = ctx->config.dec_head_dim;
+        qkn_decoder_t *dec = &ctx->dec_ctx.decoder;
+
+        /* Final norm */
+        if (dec->norm)
+            for (int i = 0; i < dim; i++) dec->norm[i] += 1.0f;
+
+        for (int l = 0; l < ctx->config.dec_layers; l++) {
+            qkn_dec_layer_t *layer = &dec->layers[l];
+            if (layer->input_norm)
+                for (int i = 0; i < dim; i++) layer->input_norm[i] += 1.0f;
+            if (layer->post_attn_norm)
+                for (int i = 0; i < dim; i++) layer->post_attn_norm[i] += 1.0f;
+            if (layer->pre_ffn_norm)
+                for (int i = 0; i < dim; i++) layer->pre_ffn_norm[i] += 1.0f;
+            if (layer->post_ffn_norm)
+                for (int i = 0; i < dim; i++) layer->post_ffn_norm[i] += 1.0f;
+            if (layer->q_norm_weight)
+                for (int i = 0; i < hdim; i++) layer->q_norm_weight[i] += 1.0f;
+            if (layer->k_norm_weight)
+                for (int i = 0; i < hdim; i++) layer->k_norm_weight[i] += 1.0f;
+        }
+    }
+
+    /* Init thread pool if not already done */
+    if (smol_get_thread_count() < 2)
+        smol_set_threads(smol_get_num_cpus());
+
     if (gemma_verbose >= 1)
-        fprintf(stderr, "[gemma] loaded: %d layers, hidden=%d, vocab=%d\n",
+        fprintf(stderr, "[gemma] loaded: %d layers, hidden=%d, vocab=%d, threads=%d\n",
                 ctx->config.dec_layers, ctx->config.dec_hidden,
-                ctx->config.vocab_size);
+                ctx->config.vocab_size, smol_get_thread_count());
 
     return ctx;
 }
@@ -204,24 +242,37 @@ int gemma_generate(gemma_ctx_t *ctx, const int *prompt_tokens, int n_prompt,
                    int max_tokens) {
     if (!ctx || !prompt_tokens || n_prompt <= 0) return 0;
 
+    fprintf(stderr, "[gemma] generate: n_prompt=%d, max_tokens=%d\n", n_prompt, max_tokens);
+    for (int i = 0; i < n_prompt && i < 20; i++)
+        fprintf(stderr, "[gemma]   token[%d] = %d\n", i, prompt_tokens[i]);
+
     gemma_reset(ctx);
 
     int dim = ctx->config.dec_hidden;
     const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
 
-    /* Embed all prompt tokens */
+    /* Embed all prompt tokens and scale by sqrt(hidden_size) (Gemma convention) */
+    float embed_scale = sqrtf((float)dim);
     float *embeds = (float *)malloc((size_t)n_prompt * dim * sizeof(float));
     if (!embeds) return 0;
-    for (int i = 0; i < n_prompt; i++)
+    for (int i = 0; i < n_prompt; i++) {
         tok_embed_bf16_to_f32(embeds + (size_t)i * dim, tok_emb, prompt_tokens[i], dim);
+        for (int d = 0; d < dim; d++)
+            embeds[i * dim + d] *= embed_scale;
+    }
 
     /* Prefill: all but last token */
     if (n_prompt > 1)
         qkn_decoder_prefill(&ctx->dec_ctx, embeds, n_prompt - 1);
 
+    fprintf(stderr, "[gemma] prefill done, decoding first token (dim=%d, vocab=%d, threads=%d)...\n",
+            dim, ctx->config.vocab_size, smol_get_thread_count());
+
     /* First decode: last prompt token */
     int token = qkn_decoder_forward(&ctx->dec_ctx, embeds + (size_t)(n_prompt - 1) * dim);
     free(embeds);
+
+    fprintf(stderr, "[gemma] first token: %d (eos=%d)\n", token, ctx->eos_token);
 
     float *tmp_embed = (float *)malloc(dim * sizeof(float));
     if (!tmp_embed) return 0;
@@ -237,6 +288,7 @@ int gemma_generate(gemma_ctx_t *ctx, const int *prompt_tokens, int n_prompt,
             ctx->id_cb(token, ctx->id_cb_userdata);
 
         tok_embed_bf16_to_f32(tmp_embed, tok_emb, token, dim);
+        for (int d = 0; d < dim; d++) tmp_embed[d] *= embed_scale;
         token = qkn_decoder_forward(&ctx->dec_ctx, tmp_embed);
     }
 
