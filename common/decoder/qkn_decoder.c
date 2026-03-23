@@ -242,39 +242,69 @@ static int ensure_rope_inv_freq(qkn_ctx_t *ctx, int head_dim, float theta) {
     return 0;
 }
 
-static int ensure_rope_cache(qkn_ctx_t *ctx, int required_pos, int head_dim, float theta) {
-    if (required_pos <= ctx->rope_cache_cap) return 0;
-    if (ensure_rope_inv_freq(ctx, head_dim, theta) != 0) return -1;
+static int fill_rope_cache(float **cos_p, float **sin_p, int *cap_p,
+                            const float *inv_freq, int half, int head_dim,
+                            int required_pos, int interleaved) {
+    if (required_pos <= *cap_p) return 0;
 
-    int new_cap = ctx->rope_cache_cap > 0 ? ctx->rope_cache_cap : 1024;
+    int new_cap = *cap_p > 0 ? *cap_p : 1024;
     while (new_cap < required_pos) new_cap *= 2;
 
     size_t n = (size_t)new_cap * head_dim;
-    float *new_cos = (float *)realloc(ctx->rope_cache_cos, n * sizeof(float));
+    float *new_cos = (float *)realloc(*cos_p, n * sizeof(float));
     if (!new_cos) return -1;
-    ctx->rope_cache_cos = new_cos;
-
-    float *new_sin = (float *)realloc(ctx->rope_cache_sin, n * sizeof(float));
+    *cos_p = new_cos;
+    float *new_sin = (float *)realloc(*sin_p, n * sizeof(float));
     if (!new_sin) return -1;
-    ctx->rope_cache_sin = new_sin;
+    *sin_p = new_sin;
 
-    int half = head_dim / 2;
-    for (int pos = ctx->rope_cache_cap; pos < new_cap; pos++) {
+    for (int pos = *cap_p; pos < new_cap; pos++) {
         float p = (float)pos;
-        float *cos_row = ctx->rope_cache_cos + (size_t)pos * head_dim;
-        float *sin_row = ctx->rope_cache_sin + (size_t)pos * head_dim;
+        float *cr = new_cos + (size_t)pos * head_dim;
+        float *sr = new_sin + (size_t)pos * head_dim;
         for (int d = 0; d < half; d++) {
-            float angle = p * ctx->rope_inv_freq[d];
+            float angle = p * inv_freq[d];
             float c = cosf(angle);
             float s = sinf(angle);
-            cos_row[d] = c;
-            cos_row[half + d] = c;
-            sin_row[d] = s;
-            sin_row[half + d] = s;
+            if (interleaved) {
+                cr[2*d] = c; cr[2*d+1] = c;
+                sr[2*d] = s; sr[2*d+1] = s;
+            } else {
+                cr[d] = c; cr[half+d] = c;
+                sr[d] = s; sr[half+d] = s;
+            }
         }
     }
+    *cap_p = new_cap;
+    return 0;
+}
 
-    ctx->rope_cache_cap = new_cap;
+static int ensure_rope_caches(qkn_ctx_t *ctx, int required_pos) {
+    int head_dim = ctx->config.dec_head_dim;
+    int half = head_dim / 2;
+    int interleaved = (ctx->config.rope_type == QKN_ROPE_INTERLEAVED);
+    float theta = ctx->config.dec_rope_theta;
+    float local_theta = ctx->config.dec_rope_local_theta;
+
+    /* Global theta cache (full attention layers) */
+    if (ensure_rope_inv_freq(ctx, head_dim, theta) != 0) return -1;
+    if (fill_rope_cache(&ctx->rope_cache_cos, &ctx->rope_cache_sin,
+                         &ctx->rope_cache_cap, ctx->rope_inv_freq,
+                         half, head_dim, required_pos, interleaved) != 0) return -1;
+
+    /* Local theta cache (sliding window layers) — only if different theta */
+    if (local_theta > 0.0f && local_theta != theta) {
+        if (!ctx->rope_local_inv_freq) {
+            ctx->rope_local_inv_freq = (float *)malloc(half * sizeof(float));
+            if (!ctx->rope_local_inv_freq) return -1;
+            for (int d = 0; d < half; d++)
+                ctx->rope_local_inv_freq[d] = 1.0f / powf(local_theta, (float)(2*d) / (float)head_dim);
+        }
+        if (fill_rope_cache(&ctx->rope_local_cache_cos, &ctx->rope_local_cache_sin,
+                             &ctx->rope_local_cache_cap, ctx->rope_local_inv_freq,
+                             half, head_dim, required_pos, interleaved) != 0) return -1;
+    }
+
     return 0;
 }
 
@@ -341,14 +371,29 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
     memcpy(x, input_embeds, (size_t)seq_len * dim * sizeof(float));
 
     int start_pos = ctx->kv_cache_len;
-    if (ensure_rope_cache(ctx, start_pos + seq_len, head_dim, theta) != 0) return;
-    const float *rope_cos = ctx->rope_cache_cos + (size_t)start_pos * head_dim;
-    const float *rope_sin = ctx->rope_cache_sin + (size_t)start_pos * head_dim;
+    if (ensure_rope_caches(ctx, start_pos + seq_len) != 0) return;
+
+    int has_local = (ctx->rope_local_cache_cos != NULL);
+
+    void (*apply_rope)(float *, const float *, const float *, int, int, int) =
+        cfg->rope_type == QKN_ROPE_INTERLEAVED
+            ? smol_apply_rope_interleaved
+            : smol_apply_rope_neox;
 
     float scale = 1.0f / sqrtf((float)head_dim);
 
     for (int layer = 0; layer < cfg->dec_layers; layer++) {
         qkn_dec_layer_t *l = &dec->layers[layer];
+
+        /* Per-layer RoPE cache selection (sliding layers may use local theta) */
+        const float *rope_cos, *rope_sin;
+        if (has_local && l->is_sliding) {
+            rope_cos = ctx->rope_local_cache_cos + (size_t)start_pos * head_dim;
+            rope_sin = ctx->rope_local_cache_sin + (size_t)start_pos * head_dim;
+        } else {
+            rope_cos = ctx->rope_cache_cos + (size_t)start_pos * head_dim;
+            rope_sin = ctx->rope_cache_sin + (size_t)start_pos * head_dim;
+        }
 
         /* Input RMSNorm */
         smol_rms_norm(x_norm, x, l->input_norm, seq_len, dim, eps);
@@ -362,9 +407,9 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
         smol_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
         smol_rms_norm_per_head(k, l->k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
 
-        /* Apply NeoX RoPE */
-        smol_apply_rope_neox(q, rope_cos, rope_sin, seq_len, n_heads, head_dim);
-        smol_apply_rope_neox(k, rope_cos, rope_sin, seq_len, n_kv_heads, head_dim);
+        /* Apply RoPE */
+        apply_rope(q, rope_cos, rope_sin, seq_len, n_heads, head_dim);
+        apply_rope(k, rope_cos, rope_sin, seq_len, n_kv_heads, head_dim);
 
         /* Store K, V in cache */
         for (int s = 0; s < seq_len; s++) {
@@ -457,16 +502,29 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
         if (kv_cache_grow(ctx, pos + 1024) != 0) return SMOL_TOKEN_IM_END;
     }
 
-    if (ensure_rope_cache(ctx, pos + 1, head_dim, theta) != 0) {
+    if (ensure_rope_caches(ctx, pos + 1) != 0) {
         return SMOL_TOKEN_IM_END;
     }
-    const float *rope_cos = ctx->rope_cache_cos + (size_t)pos * head_dim;
-    const float *rope_sin = ctx->rope_cache_sin + (size_t)pos * head_dim;
+    int has_local = (ctx->rope_local_cache_cos != NULL);
+
+    void (*apply_rope)(float *, const float *, const float *, int, int, int) =
+        cfg->rope_type == QKN_ROPE_INTERLEAVED
+            ? smol_apply_rope_interleaved
+            : smol_apply_rope_neox;
 
     float scale = 1.0f / sqrtf((float)head_dim);
 
     for (int layer = 0; layer < cfg->dec_layers; layer++) {
         qkn_dec_layer_t *l = &dec->layers[layer];
+
+        const float *rope_cos, *rope_sin;
+        if (has_local && l->is_sliding) {
+            rope_cos = ctx->rope_local_cache_cos + (size_t)pos * head_dim;
+            rope_sin = ctx->rope_local_cache_sin + (size_t)pos * head_dim;
+        } else {
+            rope_cos = ctx->rope_cache_cos + (size_t)pos * head_dim;
+            rope_sin = ctx->rope_cache_sin + (size_t)pos * head_dim;
+        }
 
         smol_rms_norm(x_norm, x, l->input_norm, 1, dim, eps);
         smol_linear_nobias_bf16_qkv(q, k, v, x_norm,
@@ -479,9 +537,9 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
         smol_rms_norm_per_head(q, l->q_norm_weight, 1, n_heads, head_dim, eps);
         smol_rms_norm_per_head(k, l->k_norm_weight, 1, n_kv_heads, head_dim, eps);
 
-        /* Apply NeoX RoPE */
-        smol_apply_rope_neox(q, rope_cos, rope_sin, 1, n_heads, head_dim);
-        smol_apply_rope_neox(k, rope_cos, rope_sin, 1, n_kv_heads, head_dim);
+        /* Apply RoPE */
+        apply_rope(q, rope_cos, rope_sin, 1, n_heads, head_dim);
+        apply_rope(k, rope_cos, rope_sin, 1, n_kv_heads, head_dim);
 
         memcpy(kv_cache_k_at(ctx, layer, pos), k, kv_dim * sizeof(float));
         memcpy(kv_cache_v_at(ctx, layer, pos), v, kv_dim * sizeof(float));

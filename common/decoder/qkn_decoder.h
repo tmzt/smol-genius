@@ -30,6 +30,11 @@ typedef enum {
     QKN_ACT_GEGLU  = 1,  /* GELU(gate) * up — Gemma 3 */
 } qkn_activation_t;
 
+typedef enum {
+    QKN_ROPE_NEOX        = 0,  /* split-half: (x[d], x[half+d]) — Qwen3 */
+    QKN_ROPE_INTERLEAVED = 1,  /* consecutive pairs: (x[2d], x[2d+1]) — Gemma 3 */
+} qkn_rope_type_t;
+
 typedef struct {
     /* Attention weights (bf16, no bias) */
     uint16_t *wq_weight_bf16;
@@ -78,6 +83,8 @@ typedef struct {
     float dec_rms_norm_eps;
     float dec_rope_theta;
     qkn_activation_t activation;
+    qkn_rope_type_t  rope_type;
+    float dec_rope_local_theta; /* RoPE theta for sliding window layers (0 = same as dec_rope_theta) */
     int   sliding_window;       /* 0 = disabled, >0 = window size */
     int   sliding_window_pattern; /* every Nth layer is full attention (0 = all full) */
 } qkn_config_t;
@@ -119,12 +126,18 @@ typedef struct {
     float *dec_rope_cos;
     float *dec_rope_sin;
 
-    /* RoPE cache */
+    /* RoPE cache (global theta — used for full attention layers) */
     float *rope_inv_freq;
     int    rope_inv_freq_half;
     float *rope_cache_cos;
     float *rope_cache_sin;
     int    rope_cache_cap;
+
+    /* RoPE cache (local theta — used for sliding window layers, Gemma 3) */
+    float *rope_local_inv_freq;
+    float *rope_local_cache_cos;
+    float *rope_local_cache_sin;
+    int    rope_local_cache_cap;
 } qkn_ctx_t;
 
 /* ========================================================================

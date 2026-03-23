@@ -94,8 +94,10 @@ static int detect_config(gemma_ctx_t *ctx, multi_safetensors_t *ms) {
     }
 
     cfg->dec_rms_norm_eps = 1e-6f;
-    cfg->dec_rope_theta = 1e6f;
+    cfg->dec_rope_theta = 1e6f;          /* full attention layers */
+    cfg->dec_rope_local_theta = 10000.0f; /* sliding window layers */
     cfg->activation = QKN_ACT_GEGLU;
+    cfg->rope_type = QKN_ROPE_INTERLEAVED;
 
     /* Set per-layer sliding window flags */
     int pat = cfg->sliding_window_pattern;

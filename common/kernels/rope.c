@@ -44,6 +44,58 @@ void smol_compute_rope_neox(float *cos_out, float *sin_out, const int *positions
     }
 }
 
+/* ========================================================================
+ * Interleaved RoPE — pairs (x[2d], x[2d+1]), used by Gemma 3
+ * ======================================================================== */
+
+void smol_compute_rope_interleaved(float *cos_out, float *sin_out, const int *positions,
+                                     int seq, int head_dim, float theta) {
+    int half = head_dim / 2;
+    for (int s = 0; s < seq; s++) {
+        float pos = (float)positions[s];
+        for (int d = 0; d < half; d++) {
+            float freq = 1.0f / powf(theta, (float)(2 * d) / (float)head_dim);
+            float angle = pos * freq;
+            /* Interleaved layout: cos/sin for pair (2d, 2d+1) */
+            cos_out[s * head_dim + 2 * d]     = cosf(angle);
+            cos_out[s * head_dim + 2 * d + 1] = cosf(angle);
+            sin_out[s * head_dim + 2 * d]     = sinf(angle);
+            sin_out[s * head_dim + 2 * d + 1] = sinf(angle);
+        }
+    }
+}
+
+void smol_apply_rope_interleaved(float *x, const float *cos_vals, const float *sin_vals,
+                                   int seq, int n_heads, int head_dim) {
+    /*
+     * Interleaved style:
+     *   for each pair (x[2d], x[2d+1]):
+     *     new[2d]   = x[2d] * cos - x[2d+1] * sin
+     *     new[2d+1] = x[2d+1] * cos + x[2d] * sin
+     */
+    int hidden = n_heads * head_dim;
+    int half = head_dim / 2;
+
+    for (int s = 0; s < seq; s++) {
+        const float *c = cos_vals + s * head_dim;
+        const float *sn = sin_vals + s * head_dim;
+
+        for (int h = 0; h < n_heads; h++) {
+            float *vec = x + s * hidden + h * head_dim;
+            for (int d = 0; d < half; d++) {
+                float x0 = vec[2 * d];
+                float x1 = vec[2 * d + 1];
+                vec[2 * d]     = x0 * c[2 * d]     - x1 * sn[2 * d];
+                vec[2 * d + 1] = x1 * c[2 * d + 1] + x0 * sn[2 * d + 1];
+            }
+        }
+    }
+}
+
+/* ========================================================================
+ * NeoX Split-Half RoPE — pairs (x[d], x[half+d]), used by Qwen3
+ * ======================================================================== */
+
 void smol_apply_rope_neox(float *x, const float *cos_vals, const float *sin_vals,
                             int seq, int n_heads, int head_dim) {
     /*

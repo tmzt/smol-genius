@@ -138,6 +138,14 @@ __attribute__((visibility("default")))
 void smol_apply_rope_neox(float *x, const float *cos_vals, const float *sin_vals,
                             int seq, int n_heads, int head_dim);
 
+/* Interleaved RoPE: pairs (x[2d], x[2d+1]) — used by Gemma 3 */
+__attribute__((visibility("default")))
+void smol_compute_rope_interleaved(float *cos_out, float *sin_out, const int *positions,
+                                     int seq, int head_dim, float theta);
+__attribute__((visibility("default")))
+void smol_apply_rope_interleaved(float *x, const float *cos_vals, const float *sin_vals,
+                                   int seq, int n_heads, int head_dim);
+
 /* Streaming argmax: finds argmax(W_bf16 @ x) without materializing full logits. */
 __attribute__((visibility("default")))
 int smol_argmax_matvec_bf16(const float *x, const uint16_t *W_bf16,
