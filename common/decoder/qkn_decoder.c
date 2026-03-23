@@ -33,6 +33,14 @@ static float *load_f32(multi_safetensors_t *ms, const char *name) {
     return safetensors_get_f32(sf, t);
 }
 
+/* Like load_f32 but returns NULL silently if not found (for optional weights). */
+static float *load_f32_optional(multi_safetensors_t *ms, const char *name) {
+    safetensors_file_t *sf = NULL;
+    const safetensor_t *t = multi_safetensors_find(ms, name, &sf);
+    if (!t) return NULL;
+    return safetensors_get_f32(sf, t);
+}
+
 static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
     safetensors_file_t *sf = NULL;
     const safetensor_t *t = multi_safetensors_find(ms, name, &sf);
@@ -82,7 +90,13 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
         snprintf(name, sizeof(name), "%s.layers.%d.post_attention_layernorm.weight", prefix, i);
         l->post_attn_norm = load_f32(ms, name);
 
-        /* SwiGLU MLP weights (bf16, no bias) */
+        /* Gemma 3: extra feedforward norms (optional, NULL if not present) */
+        snprintf(name, sizeof(name), "%s.layers.%d.pre_feedforward_layernorm.weight", prefix, i);
+        l->pre_ffn_norm = load_f32_optional(ms, name);
+        snprintf(name, sizeof(name), "%s.layers.%d.post_feedforward_layernorm.weight", prefix, i);
+        l->post_ffn_norm = load_f32_optional(ms, name);
+
+        /* MLP weights (bf16, no bias) */
         snprintf(name, sizeof(name), "%s.layers.%d.mlp.gate_proj.weight", prefix, i);
         l->gate_weight_bf16 = load_bf16_direct(ms, name);
         snprintf(name, sizeof(name), "%s.layers.%d.mlp.up_proj.weight", prefix, i);
@@ -360,13 +374,18 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
                    v + s * kv_dim, kv_dim * sizeof(float));
         }
 
-        /* Causal attention */
+        /* Attention — sliding window or full causal */
         int total_seq = start_pos + seq_len;
         float *full_k = kv_cache_k_at(ctx, layer, 0);
         float *full_v = kv_cache_v_at(ctx, layer, 0);
-        smol_causal_attention(attn_out, q, full_k, full_v,
-                               seq_len, total_seq, n_heads, n_kv_heads,
-                               head_dim, scale, start_pos);
+        if (l->is_sliding && cfg->sliding_window > 0)
+            smol_sliding_window_attention(attn_out, q, full_k, full_v,
+                                           seq_len, total_seq, n_heads, n_kv_heads,
+                                           head_dim, scale, start_pos, cfg->sliding_window);
+        else
+            smol_causal_attention(attn_out, q, full_k, full_v,
+                                   seq_len, total_seq, n_heads, n_kv_heads,
+                                   head_dim, scale, start_pos);
 
         /* Output projection + residual */
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16,
@@ -376,12 +395,23 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
         /* Post-attention RMSNorm */
         smol_rms_norm(x_norm, x, l->post_attn_norm, seq_len, dim, eps);
 
-        /* SwiGLU MLP */
+        /* Pre-feedforward norm (Gemma 3) */
+        if (l->pre_ffn_norm)
+            smol_rms_norm(x_norm, x_norm, l->pre_ffn_norm, seq_len, dim, eps);
+
+        /* Gated MLP: GeGLU or SwiGLU */
         smol_linear_nobias_bf16(gate_up, x_norm, l->gate_up_fused_bf16,
                                  seq_len, dim, 2 * intermediate);
-        smol_swiglu_multiply(gate, gate_up, seq_len, intermediate);
+        if (cfg->activation == QKN_ACT_GEGLU)
+            smol_geglu_multiply(gate, gate_up, seq_len, intermediate);
+        else
+            smol_swiglu_multiply(gate, gate_up, seq_len, intermediate);
         smol_linear_nobias_bf16(ffn_out, gate, l->down_weight_bf16,
                                  seq_len, intermediate, dim);
+
+        /* Post-feedforward norm (Gemma 3) */
+        if (l->post_ffn_norm)
+            smol_rms_norm(ffn_out, ffn_out, l->post_ffn_norm, seq_len, dim, eps);
 
         smol_add_inplace(x, ffn_out, seq_len * dim);
     }
@@ -458,20 +488,37 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
         float *full_k = kv_cache_k_at(ctx, layer, 0);
         float *full_v = kv_cache_v_at(ctx, layer, 0);
 
-        smol_causal_attention(attn_out, q, full_k, full_v,
-                               1, total_seq, n_heads, n_kv_heads,
-                               head_dim, scale, pos);
+        if (l->is_sliding && cfg->sliding_window > 0)
+            smol_sliding_window_attention(attn_out, q, full_k, full_v,
+                                           1, total_seq, n_heads, n_kv_heads,
+                                           head_dim, scale, pos, cfg->sliding_window);
+        else
+            smol_causal_attention(attn_out, q, full_k, full_v,
+                                   1, total_seq, n_heads, n_kv_heads,
+                                   head_dim, scale, pos);
 
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16, 1, q_dim, dim);
         smol_add_inplace(x, proj_out, dim);
 
         smol_rms_norm(x_norm, x, l->post_attn_norm, 1, dim, eps);
 
+        /* Pre-feedforward norm (Gemma 3) */
+        if (l->pre_ffn_norm)
+            smol_rms_norm(x_norm, x_norm, l->pre_ffn_norm, 1, dim, eps);
+
         /* Fused gate+up matvec */
         smol_linear_nobias_bf16(gate_buf, x_norm, l->gate_up_fused_bf16,
                                  1, dim, 2 * intermediate);
-        smol_swiglu_multiply(gate_buf, gate_buf, 1, intermediate);
+        if (cfg->activation == QKN_ACT_GEGLU)
+            smol_geglu_multiply(gate_buf, gate_buf, 1, intermediate);
+        else
+            smol_swiglu_multiply(gate_buf, gate_buf, 1, intermediate);
         smol_linear_nobias_bf16(ffn_out, gate_buf, l->down_weight_bf16, 1, intermediate, dim);
+
+        /* Post-feedforward norm (Gemma 3) */
+        if (l->post_ffn_norm)
+            smol_rms_norm(ffn_out, ffn_out, l->post_ffn_norm, 1, dim, eps);
+
         smol_add_inplace(x, ffn_out, dim);
     }
 

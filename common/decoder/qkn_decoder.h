@@ -25,6 +25,11 @@
  * Types
  * ======================================================================== */
 
+typedef enum {
+    QKN_ACT_SWIGLU = 0,  /* SiLU(gate) * up — Qwen3 */
+    QKN_ACT_GEGLU  = 1,  /* GELU(gate) * up — Gemma 3 */
+} qkn_activation_t;
+
 typedef struct {
     /* Attention weights (bf16, no bias) */
     uint16_t *wq_weight_bf16;
@@ -47,6 +52,13 @@ typedef struct {
 
     /* Fused gate+up (interleaved rows) */
     uint16_t *gate_up_fused_bf16;
+
+    /* Gemma 3: extra feedforward norms (NULL if not present) */
+    float *pre_ffn_norm;
+    float *post_ffn_norm;
+
+    /* Sliding window: 1 = use sliding window, 0 = full causal */
+    int is_sliding;
 } qkn_dec_layer_t;
 
 typedef struct {
@@ -65,6 +77,9 @@ typedef struct {
     int   vocab_size;
     float dec_rms_norm_eps;
     float dec_rope_theta;
+    qkn_activation_t activation;
+    int   sliding_window;       /* 0 = disabled, >0 = window size */
+    int   sliding_window_pattern; /* every Nth layer is full attention (0 = all full) */
 } qkn_config_t;
 
 typedef struct {

@@ -101,6 +101,45 @@ void smol_swiglu_multiply(float *out, const float *gate_up, int seq_len, int int
     }
 }
 
+static void geglu_worker(int tid, int n_threads, void *arg) {
+    swiglu_task_t *t = (swiglu_task_t *)arg;
+    int chunk = (t->seq_len + n_threads - 1) / n_threads;
+    int s0 = tid * chunk;
+    int s1 = s0 + chunk;
+    if (s1 > t->seq_len) s1 = t->seq_len;
+    if (s0 >= s1) return;
+
+    int inter = t->intermediate;
+    for (int s = s0; s < s1; s++) {
+        const float *gu = t->gate_up + (size_t)s * 2 * inter;
+        float *o = t->out + (size_t)s * inter;
+        for (int j = 0; j < inter; j++) {
+            float g = gu[2 * j];
+            float u = gu[2 * j + 1];
+            /* GELU-tanh: 0.5 * g * (1 + tanh(sqrt(2/pi) * (g + 0.044715 * g^3))) */
+            float x3 = g * g * g;
+            float inner = 0.7978845608028654f * (g + 0.044715f * x3);
+            g = 0.5f * g * (1.0f + tanhf(inner));
+            o[j] = g * u;
+        }
+    }
+}
+
+void smol_geglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate) {
+    swiglu_task_t task = {
+        .out = out,
+        .gate_up = gate_up,
+        .seq_len = seq_len,
+        .intermediate = intermediate
+    };
+
+    if (smol_get_thread_count() > 1 && seq_len >= 2 && intermediate >= 256) {
+        smol_parallel_for(geglu_worker, &task);
+    } else {
+        geglu_worker(0, 1, &task);
+    }
+}
+
 void smol_softmax(float *x, int rows, int cols) {
     for (int r = 0; r < rows; r++) {
         float *row = x + r * cols;

@@ -99,6 +99,8 @@ __attribute__((visibility("default")))
 void smol_softmax(float *x, int rows, int cols);
 __attribute__((visibility("default")))
 void smol_swiglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate);
+__attribute__((visibility("default")))
+void smol_geglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate);
 
 /* ========================================================================
  * Attention Operations
@@ -114,6 +116,12 @@ __attribute__((visibility("default")))
 void smol_causal_attention(float *out, const float *Q, const float *K, const float *V,
                             int seq_q, int seq_k, int n_heads, int n_kv_heads,
                             int head_dim, float scale, int q_offset);
+
+__attribute__((visibility("default")))
+void smol_sliding_window_attention(float *out, const float *Q, const float *K,
+                                    const float *V, int seq_q, int seq_k,
+                                    int n_heads, int n_kv_heads, int head_dim,
+                                    float scale, int q_offset, int window_size);
 
 /* ========================================================================
  * Position Embeddings

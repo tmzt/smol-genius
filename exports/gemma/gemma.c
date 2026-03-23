@@ -59,33 +59,46 @@ static int detect_config(gemma_ctx_t *ctx, multi_safetensors_t *ms) {
         "model.layers.18.self_attn.q_proj.weight", NULL);
 
     if (!test) {
-        /* ≤18 layers — Gemma 2 270M (functiongemma, gemma-2-270m-it) */
-        cfg->dec_hidden = 1536;
+        /* ≤18 layers — Gemma 3 270M (functiongemma-270m-it) */
+        cfg->dec_hidden = 640;
         cfg->dec_layers = 18;
-        cfg->dec_heads = 8;
-        cfg->dec_kv_heads = 4;
-        cfg->dec_head_dim = 192;
-        cfg->dec_intermediate = 6144;
-        cfg->vocab_size = 256128;
+        cfg->dec_heads = 4;
+        cfg->dec_kv_heads = 1;
+        cfg->dec_head_dim = 256;
+        cfg->dec_intermediate = 2048;
+        cfg->vocab_size = 262144;
+        cfg->sliding_window = 512;
+        cfg->sliding_window_pattern = 6; /* every 6th layer is full attention */
         if (gemma_verbose >= 1)
-            fprintf(stderr, "[gemma] detected: 270M (18 layers, hidden=%d)\n",
+            fprintf(stderr, "[gemma] detected: Gemma 3 270M (18 layers, hidden=%d)\n",
                     cfg->dec_hidden);
     } else {
-        /* >18 layers — Gemma 2 2B */
+        /* >18 layers — Gemma 3 2B or larger */
         cfg->dec_hidden = 2304;
         cfg->dec_layers = 26;
         cfg->dec_heads = 8;
         cfg->dec_kv_heads = 4;
         cfg->dec_head_dim = 256;
         cfg->dec_intermediate = 9216;
-        cfg->vocab_size = 256128;
+        cfg->vocab_size = 262144;
+        cfg->sliding_window = 4096;
+        cfg->sliding_window_pattern = 6;
         if (gemma_verbose >= 1)
-            fprintf(stderr, "[gemma] detected: 2B (26 layers, hidden=%d)\n",
+            fprintf(stderr, "[gemma] detected: Gemma 3 2B (26 layers, hidden=%d)\n",
                     cfg->dec_hidden);
     }
 
     cfg->dec_rms_norm_eps = 1e-6f;
-    cfg->dec_rope_theta = 10000.0f;
+    cfg->dec_rope_theta = 1e6f;
+    cfg->activation = QKN_ACT_GEGLU;
+
+    /* Set per-layer sliding window flags */
+    int pat = cfg->sliding_window_pattern;
+    for (int i = 0; i < cfg->dec_layers; i++) {
+        /* Every pat-th layer (0-indexed: pat-1, 2*pat-1, ...) is full attention */
+        ctx->dec_ctx.decoder.layers[i].is_sliding =
+            (pat > 0 && ((i + 1) % pat) != 0) ? 1 : 0;
+    }
 
     return 0;
 }
@@ -134,7 +147,7 @@ gemma_ctx_t *gemma_load(const char *model_dir) {
         return NULL;
     }
 
-    ctx->eos_token = 1;   /* <eos> */
+    ctx->eos_token = 106;  /* <end_of_turn> (Gemma 3) */
     ctx->bos_token = 2;   /* <bos> */
 
     if (gemma_verbose >= 1)
