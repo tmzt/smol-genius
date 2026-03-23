@@ -244,9 +244,11 @@ int gemma_generate(gemma_ctx_t *ctx, const int *prompt_tokens, int n_prompt,
                    int max_tokens) {
     if (!ctx || !prompt_tokens || n_prompt <= 0) return 0;
 
-    fprintf(stderr, "[gemma] generate: n_prompt=%d, max_tokens=%d\n", n_prompt, max_tokens);
-    for (int i = 0; i < n_prompt && i < 20; i++)
-        fprintf(stderr, "[gemma]   token[%d] = %d\n", i, prompt_tokens[i]);
+    if (gemma_verbose >= 2) {
+        fprintf(stderr, "[gemma] generate: n_prompt=%d, max_tokens=%d\n", n_prompt, max_tokens);
+        for (int i = 0; i < n_prompt && i < 20; i++)
+            fprintf(stderr, "[gemma]   token[%d] = %d\n", i, prompt_tokens[i]);
+    }
 
     gemma_reset(ctx);
 
@@ -267,14 +269,16 @@ int gemma_generate(gemma_ctx_t *ctx, const int *prompt_tokens, int n_prompt,
     if (n_prompt > 1)
         qkn_decoder_prefill(&ctx->dec_ctx, embeds, n_prompt - 1);
 
-    fprintf(stderr, "[gemma] prefill done, decoding first token (dim=%d, vocab=%d, threads=%d)...\n",
-            dim, ctx->config.vocab_size, smol_get_thread_count());
+    if (gemma_verbose >= 2)
+        fprintf(stderr, "[gemma] prefill done, decoding first token (dim=%d, vocab=%d, threads=%d)...\n",
+                dim, ctx->config.vocab_size, smol_get_thread_count());
 
     /* First decode: last prompt token */
     int token = qkn_decoder_forward(&ctx->dec_ctx, embeds + (size_t)(n_prompt - 1) * dim);
     free(embeds);
 
-    fprintf(stderr, "[gemma] first token: %d (eos=%d)\n", token, ctx->eos_token);
+    if (gemma_verbose >= 2)
+        fprintf(stderr, "[gemma] first token: %d (eos=%d)\n", token, ctx->eos_token);
 
     float *tmp_embed = (float *)malloc(dim * sizeof(float));
     if (!tmp_embed) return 0;

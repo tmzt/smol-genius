@@ -432,17 +432,20 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
                                    seq_len, total_seq, n_heads, n_kv_heads,
                                    head_dim, scale, start_pos);
 
-        /* Output projection + residual */
+        /* Output projection */
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16,
                                  seq_len, q_dim, dim);
-        smol_add_inplace(x, proj_out, seq_len * dim);
 
-        /* Post-attention RMSNorm */
-        smol_rms_norm(x_norm, x, l->post_attn_norm, seq_len, dim, eps);
-
-        /* Pre-feedforward norm (Gemma 3) */
-        if (l->pre_ffn_norm)
-            smol_rms_norm(x_norm, x_norm, l->pre_ffn_norm, seq_len, dim, eps);
+        if (l->pre_ffn_norm) {
+            /* Gemma 3 style: post-sublayer norm before residual add */
+            smol_rms_norm(proj_out, proj_out, l->post_attn_norm, seq_len, dim, eps);
+            smol_add_inplace(x, proj_out, seq_len * dim);
+            smol_rms_norm(x_norm, x, l->pre_ffn_norm, seq_len, dim, eps);
+        } else {
+            /* Qwen3 style: residual add, then norm */
+            smol_add_inplace(x, proj_out, seq_len * dim);
+            smol_rms_norm(x_norm, x, l->post_attn_norm, seq_len, dim, eps);
+        }
 
         /* Gated MLP: GeGLU or SwiGLU */
         smol_linear_nobias_bf16(gate_up, x_norm, l->gate_up_fused_bf16,
@@ -454,9 +457,10 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
         smol_linear_nobias_bf16(ffn_out, gate, l->down_weight_bf16,
                                  seq_len, intermediate, dim);
 
-        /* Post-feedforward norm (Gemma 3) */
-        if (l->post_ffn_norm)
+        if (l->post_ffn_norm) {
+            /* Gemma 3 style: post-sublayer norm before residual add */
             smol_rms_norm(ffn_out, ffn_out, l->post_ffn_norm, seq_len, dim, eps);
+        }
 
         smol_add_inplace(x, ffn_out, seq_len * dim);
     }
@@ -558,13 +562,17 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
                                    head_dim, scale, pos);
 
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16, 1, q_dim, dim);
-        smol_add_inplace(x, proj_out, dim);
 
-        smol_rms_norm(x_norm, x, l->post_attn_norm, 1, dim, eps);
-
-        /* Pre-feedforward norm (Gemma 3) */
-        if (l->pre_ffn_norm)
-            smol_rms_norm(x_norm, x_norm, l->pre_ffn_norm, 1, dim, eps);
+        if (l->pre_ffn_norm) {
+            /* Gemma 3 style: post-sublayer norm before residual add */
+            smol_rms_norm(proj_out, proj_out, l->post_attn_norm, 1, dim, eps);
+            smol_add_inplace(x, proj_out, dim);
+            smol_rms_norm(x_norm, x, l->pre_ffn_norm, 1, dim, eps);
+        } else {
+            /* Qwen3 style: residual add, then norm */
+            smol_add_inplace(x, proj_out, dim);
+            smol_rms_norm(x_norm, x, l->post_attn_norm, 1, dim, eps);
+        }
 
         /* Fused gate+up matvec */
         smol_linear_nobias_bf16(gate_buf, x_norm, l->gate_up_fused_bf16,
@@ -575,7 +583,6 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
             smol_swiglu_multiply(gate_buf, gate_buf, 1, intermediate);
         smol_linear_nobias_bf16(ffn_out, gate_buf, l->down_weight_bf16, 1, intermediate, dim);
 
-        /* Post-feedforward norm (Gemma 3) */
         if (l->post_ffn_norm)
             smol_rms_norm(ffn_out, ffn_out, l->post_ffn_norm, 1, dim, eps);
 
