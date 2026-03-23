@@ -1,15 +1,14 @@
 /*
  * gemma.c - Gemma text generation export
  *
- * High-level API wrapping qkn_decoder for Gemma 2 family models.
- * Loads BF16 safetensors, auto-detects model size, provides
- * tokenize/generate/reset interface.
+ * High-level API wrapping qkn_decoder for Gemma 3 family models.
+ * Loads BF16 safetensors, auto-detects model size.
+ * Tokenization is handled on the Rust side — this API works with token IDs.
  */
 
 #include "gemma.h"
 #include "../../common/decoder/qkn_decoder.h"
 #include "../../common/utils/safetensors.h"
-#include "../../common/utils/tokenizer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,10 +24,11 @@ struct gemma_ctx_t {
     qkn_ctx_t          dec_ctx;
     qkn_config_t       config;
     multi_safetensors_t *safetensors;
-    smol_tokenizer_t   *tokenizer;
 
     gemma_token_cb      token_cb;
     void               *token_cb_userdata;
+    gemma_id_cb         id_cb;
+    void               *id_cb_userdata;
 
     int                 eos_token;
     int                 bos_token;
@@ -54,12 +54,11 @@ static void tok_embed_bf16_to_f32(float *dst, const uint16_t *tok_emb_bf16,
 static int detect_config(gemma_ctx_t *ctx, multi_safetensors_t *ms) {
     qkn_config_t *cfg = &ctx->config;
 
-    /* Probe for layer 18 (0-indexed) to distinguish model sizes */
     const safetensor_t *test = multi_safetensors_find(ms,
         "model.layers.18.self_attn.q_proj.weight", NULL);
 
     if (!test) {
-        /* ≤18 layers — Gemma 3 270M (functiongemma-270m-it) */
+        /* ≤18 layers — Gemma 3 270M */
         cfg->dec_hidden = 640;
         cfg->dec_layers = 18;
         cfg->dec_heads = 4;
@@ -68,12 +67,12 @@ static int detect_config(gemma_ctx_t *ctx, multi_safetensors_t *ms) {
         cfg->dec_intermediate = 2048;
         cfg->vocab_size = 262144;
         cfg->sliding_window = 512;
-        cfg->sliding_window_pattern = 6; /* every 6th layer is full attention */
+        cfg->sliding_window_pattern = 6;
         if (gemma_verbose >= 1)
             fprintf(stderr, "[gemma] detected: Gemma 3 270M (18 layers, hidden=%d)\n",
                     cfg->dec_hidden);
     } else {
-        /* >18 layers — Gemma 3 2B or larger */
+        /* >18 layers — Gemma 3 2B+ */
         cfg->dec_hidden = 2304;
         cfg->dec_layers = 26;
         cfg->dec_heads = 8;
@@ -95,7 +94,6 @@ static int detect_config(gemma_ctx_t *ctx, multi_safetensors_t *ms) {
     /* Set per-layer sliding window flags */
     int pat = cfg->sliding_window_pattern;
     for (int i = 0; i < cfg->dec_layers; i++) {
-        /* Every pat-th layer (0-indexed: pat-1, 2*pat-1, ...) is full attention */
         ctx->dec_ctx.decoder.layers[i].is_sliding =
             (pat > 0 && ((i + 1) % pat) != 0) ? 1 : 0;
     }
@@ -133,22 +131,8 @@ gemma_ctx_t *gemma_load(const char *model_dir) {
     }
     ctx->dec_ctx.config = ctx->config;
 
-    /* Load tokenizer (try tokenizer.json then vocab.json) */
-    char path[1024];
-    snprintf(path, sizeof(path), "%s/tokenizer.json", model_dir);
-    ctx->tokenizer = smol_tokenizer_load(path);
-    if (!ctx->tokenizer) {
-        snprintf(path, sizeof(path), "%s/vocab.json", model_dir);
-        ctx->tokenizer = smol_tokenizer_load(path);
-    }
-    if (!ctx->tokenizer) {
-        fprintf(stderr, "[gemma] failed to load tokenizer from %s\n", model_dir);
-        gemma_free(ctx);
-        return NULL;
-    }
-
-    ctx->eos_token = 106;  /* <end_of_turn> (Gemma 3) */
-    ctx->bos_token = 2;   /* <bos> */
+    ctx->eos_token = 106;
+    ctx->bos_token = 2;
 
     if (gemma_verbose >= 1)
         fprintf(stderr, "[gemma] loaded: %d layers, hidden=%d, vocab=%d\n",
@@ -160,9 +144,7 @@ gemma_ctx_t *gemma_load(const char *model_dir) {
 
 void gemma_free(gemma_ctx_t *ctx) {
     if (!ctx) return;
-    if (ctx->tokenizer) smol_tokenizer_free(ctx->tokenizer);
     if (ctx->safetensors) multi_safetensors_close(ctx->safetensors);
-    /* Free KV cache + decode buffers */
     free(ctx->dec_ctx.kv_cache_k);
     free(ctx->dec_ctx.kv_cache_v);
     free(ctx->dec_ctx.pref_x);
@@ -194,13 +176,19 @@ void gemma_free(gemma_ctx_t *ctx) {
 }
 
 /* ========================================================================
- * Token Callback
+ * Callbacks
  * ======================================================================== */
 
 void gemma_set_token_callback(gemma_ctx_t *ctx, gemma_token_cb cb, void *userdata) {
     if (!ctx) return;
     ctx->token_cb = cb;
     ctx->token_cb_userdata = userdata;
+}
+
+void gemma_set_id_callback(gemma_ctx_t *ctx, gemma_id_cb cb, void *userdata) {
+    if (!ctx) return;
+    ctx->id_cb = cb;
+    ctx->id_cb_userdata = userdata;
 }
 
 /* ========================================================================
@@ -212,75 +200,46 @@ void gemma_reset(gemma_ctx_t *ctx) {
     qkn_kv_cache_reset(&ctx->dec_ctx);
 }
 
-char *gemma_generate(gemma_ctx_t *ctx, const char *prompt, int max_tokens) {
-    if (!ctx || !prompt) return NULL;
+int gemma_generate(gemma_ctx_t *ctx, const int *prompt_tokens, int n_prompt,
+                   int max_tokens) {
+    if (!ctx || !prompt_tokens || n_prompt <= 0) return 0;
 
     gemma_reset(ctx);
 
     int dim = ctx->config.dec_hidden;
     const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
 
-    /* Tokenize */
-    int n_tokens = 0;
-    int *tokens = smol_tokenizer_encode(ctx->tokenizer, prompt, &n_tokens);
-    if (!tokens || n_tokens == 0) {
-        free(tokens);
-        return NULL;
-    }
-
-    if (gemma_verbose >= 2)
-        fprintf(stderr, "[gemma] prompt: %d tokens\n", n_tokens);
-
     /* Embed all prompt tokens */
-    float *embeds = (float *)malloc((size_t)n_tokens * dim * sizeof(float));
-    if (!embeds) { free(tokens); return NULL; }
-    for (int i = 0; i < n_tokens; i++)
-        tok_embed_bf16_to_f32(embeds + (size_t)i * dim, tok_emb, tokens[i], dim);
-    free(tokens);
+    float *embeds = (float *)malloc((size_t)n_prompt * dim * sizeof(float));
+    if (!embeds) return 0;
+    for (int i = 0; i < n_prompt; i++)
+        tok_embed_bf16_to_f32(embeds + (size_t)i * dim, tok_emb, prompt_tokens[i], dim);
 
-    /* Prefill: process all but the last token to populate KV cache */
-    if (n_tokens > 1)
-        qkn_decoder_prefill(&ctx->dec_ctx, embeds, n_tokens - 1);
+    /* Prefill: all but last token */
+    if (n_prompt > 1)
+        qkn_decoder_prefill(&ctx->dec_ctx, embeds, n_prompt - 1);
 
-    /* First decode step: feed last prompt token embedding */
-    float *last_embed = embeds + (size_t)(n_tokens - 1) * dim;
-    int token = qkn_decoder_forward(&ctx->dec_ctx, last_embed);
+    /* First decode: last prompt token */
+    int token = qkn_decoder_forward(&ctx->dec_ctx, embeds + (size_t)(n_prompt - 1) * dim);
     free(embeds);
 
-    /* Build result string */
-    size_t result_len = 0;
-    size_t result_cap = 256;
-    char *result = (char *)malloc(result_cap);
-    if (!result) return NULL;
-    result[0] = '\0';
-
     float *tmp_embed = (float *)malloc(dim * sizeof(float));
-    if (!tmp_embed) { free(result); return NULL; }
+    if (!tmp_embed) return 0;
 
+    int n_generated = 0;
     for (int i = 0; i < max_tokens; i++) {
-        if (token == ctx->eos_token || token < 0 ||
-            token >= ctx->config.vocab_size)
+        if (token == ctx->eos_token || token < 0 || token >= ctx->config.vocab_size)
             break;
 
-        const char *piece = smol_tokenizer_decode(ctx->tokenizer, token);
-        if (piece) {
-            size_t piece_len = strlen(piece);
-            if (result_len + piece_len + 1 > result_cap) {
-                result_cap = (result_len + piece_len + 1) * 2;
-                result = (char *)realloc(result, result_cap);
-            }
-            memcpy(result + result_len, piece, piece_len);
-            result_len += piece_len;
-            result[result_len] = '\0';
+        n_generated++;
 
-            if (ctx->token_cb)
-                ctx->token_cb(piece, ctx->token_cb_userdata);
-        }
+        if (ctx->id_cb)
+            ctx->id_cb(token, ctx->id_cb_userdata);
 
         tok_embed_bf16_to_f32(tmp_embed, tok_emb, token, dim);
         token = qkn_decoder_forward(&ctx->dec_ctx, tmp_embed);
     }
 
     free(tmp_embed);
-    return result;
+    return n_generated;
 }

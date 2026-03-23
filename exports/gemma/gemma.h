@@ -37,10 +37,13 @@ void gemma_free(gemma_ctx_t *ctx);
 __attribute__((visibility("default")))
 void gemma_set_token_callback(gemma_ctx_t *ctx, gemma_token_cb cb, void *userdata);
 
-/* Generate from a text prompt. Returns the full generated text (caller must free).
- * Stops at EOS or max_tokens. Token callback is invoked per-token if set. */
+/* Generate from token IDs. Returns total tokens generated.
+ * Stops at EOS or max_tokens. Token callback is invoked per-token with token ID. */
+typedef void (*gemma_id_cb)(int token_id, void *userdata);
 __attribute__((visibility("default")))
-char *gemma_generate(gemma_ctx_t *ctx, const char *prompt, int max_tokens);
+void gemma_set_id_callback(gemma_ctx_t *ctx, gemma_id_cb cb, void *userdata);
+__attribute__((visibility("default")))
+int gemma_generate(gemma_ctx_t *ctx, const int *prompt_tokens, int n_prompt, int max_tokens);
 
 /* Reset KV cache for a new sequence (called automatically by gemma_generate). */
 __attribute__((visibility("default")))
