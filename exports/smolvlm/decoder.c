@@ -55,18 +55,18 @@ int smolvlm_decoder_load(smolvlm_decoder_t *dec, multi_safetensors_t *ms,
 
     /* Token embeddings (bf16 mmap) */
     dec->tok_embeddings_bf16 = load_bf16_direct(ms,
-        "model.text_model.model.embed_tokens.weight");
+        "model.text_model.embed_tokens.weight");
     if (!dec->tok_embeddings_bf16) return -1;
 
     /* LM head (separate, NOT tied) */
     dec->lm_head_bf16 = load_bf16_direct(ms,
-        "model.text_model.lm_head.weight");
+        "lm_head.weight");
     if (!dec->lm_head_bf16) return -1;
 
     /* Transformer layers */
     for (int i = 0; i < cfg->dec_layers; i++) {
         smolvlm_dec_layer_t *l = &dec->layers[i];
-        const char *lp = "model.text_model.model.layers";
+        const char *lp = "model.text_model.layers";
 
         /* Attention weights (bf16, no bias) */
         snprintf(name, sizeof(name), "%s.%d.self_attn.q_proj.weight", lp, i);
@@ -116,7 +116,7 @@ int smolvlm_decoder_load(smolvlm_decoder_t *dec, multi_safetensors_t *ms,
     }
 
     /* Final RMSNorm */
-    dec->norm = load_f32(ms, "model.text_model.model.norm.weight");
+    dec->norm = load_f32(ms, "model.text_model.norm.weight");
     if (!dec->norm) return -1;
 
     return 0;

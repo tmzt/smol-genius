@@ -38,8 +38,8 @@
 #define SMOLVLM_CONNECTOR_DIM   10368  /* 1152 * 9 */
 
 /* Decoder (SmolLM2-1.7B) */
-#define SMOLVLM_DEC_LAYERS      24
-#define SMOLVLM_DEC_HIDDEN      2048
+#define SMOLVLM_DEC_LAYERS      48      /* max layers (runtime config determines actual) */
+#define SMOLVLM_DEC_HIDDEN      2048    /* max hidden dim for stack buffers */
 #define SMOLVLM_DEC_HEADS       32
 #define SMOLVLM_DEC_KV_HEADS    32     /* MHA, not GQA */
 #define SMOLVLM_DEC_HEAD_DIM    64

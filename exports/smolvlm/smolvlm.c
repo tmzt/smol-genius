@@ -89,7 +89,8 @@ static int load_config(smolvlm_config_t *cfg, const char *model_dir) {
 
     /* Top-level config */
     cfg->scale_factor = json_int(json, "scale_factor", 3);
-    cfg->image_seq_len = json_int(json, "image_seq_len", 81);
+    cfg->image_seq_len = json_int(json, "image_seq_len", 0);
+    /* image_seq_len will be computed after vision config is parsed if not in config */
 
     /* Vision config */
     const char *vc = find_object(json, "vision_config");
@@ -136,6 +137,14 @@ static int load_config(smolvlm_config_t *cfg, const char *model_dir) {
         cfg->dec_rms_norm_eps = 1e-5f;
         cfg->dec_rope_theta = 273768.0f;
         cfg->dec_head_dim = 64;
+    }
+
+    /* Compute image_seq_len if not provided */
+    if (cfg->image_seq_len <= 0) {
+        int n_patches_per_side = cfg->vis_image_size / cfg->vis_patch_size;
+        int total_patches = n_patches_per_side * n_patches_per_side;
+        int sf = cfg->scale_factor;
+        cfg->image_seq_len = total_patches / (sf * sf);
     }
 
     free(json);
