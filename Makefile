@@ -71,8 +71,11 @@ endif
 include common/utils/build.mk
 include common/kernels/build.mk
 
+# MODEL can be a single name or comma-separated list: MODEL=qwen_asr,gemma,nomic
+COMMA := ,
 ifdef MODEL
-  include exports/$(MODEL)/build.mk
+  MODELS := $(subst $(COMMA), ,$(MODEL))
+  $(foreach m,$(MODELS),$(eval include exports/$(m)/build.mk))
 endif
 
 # Feature dependencies: exports set ENABLE_* flags, common layers check them
