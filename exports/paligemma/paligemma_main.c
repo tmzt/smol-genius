@@ -99,17 +99,14 @@ int main(int argc, char **argv) {
     if (emit_tokens)
         paligemma_set_token_callback(ctx, stream_token_id, NULL);
 
-    /* PaliGemma prompt: just a newline token (ID 108 in Gemma tokenizer).
-     * In practice, the caller provides tokenized text after the image tokens.
-     * For this CLI we use a minimal prompt to trigger captioning. */
-    int prompt_tokens[] = { 108 };  /* "\n" in Gemma tokenizer */
-    int n_prompt = 1;
+    /* Generate using text API (handles tokenization + decoding) */
+    char *result = paligemma_generate_text(ctx, image_path, "caption en", max_tokens);
+    int n_generated = ctx->perf_tokens;
 
-    /* Generate */
-    int n_generated = paligemma_generate(ctx, image_path, prompt_tokens, n_prompt, max_tokens);
-
-    if (emit_tokens)
-        printf("\n");
+    if (result) {
+        if (emit_tokens) printf("%s\n", result);
+        free(result);
+    }
 
     /* Performance summary */
     if (verbosity >= 1) {

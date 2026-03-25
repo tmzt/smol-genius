@@ -652,5 +652,7 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
 
     /* Final norm + streaming argmax (no logits buffer needed) */
     smol_rms_norm(x, x, dec->norm, 1, dim, eps);
+
+    /* Debug: dump top logits */
     return smol_argmax_matvec_bf16(x, dec->tok_embeddings_bf16, dim, cfg->vocab_size);
 }

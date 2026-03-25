@@ -300,7 +300,7 @@ paligemma_ctx_t *paligemma_load(const char *model_dir) {
 
     /* Special tokens (PaliGemma uses Gemma tokenizer) */
     ctx->bos_token = 2;
-    ctx->eos_token = 1;    /* <eos> = 1 in Gemma tokenizer */
+    ctx->eos_token = 107;  /* \n — PaliGemma 2 uses newline as generation stop */
     ctx->image_token = 257152;  /* <image> token ID — typically last in vocab or configured */
 
     /* Try to read image_token_index from config if present */
@@ -490,9 +490,7 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
     }
 
     /* ---- Build full input sequence ----
-     * PaliGemma prompt format: <image_tokens> <text_prompt_tokens>
-     * No BOS — PaliGemma processor handles that.
-     * The prompt_tokens may already include the newline at the end.
+     * PaliGemma prompt format: <BOS> <image_tokens> <text_prompt_tokens>
      */
     int total_seq = n_vis_tokens + n_prompt_tokens;
 
@@ -512,14 +510,20 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
         return 0;
     }
 
-    /* Vision embeddings (already projected to dec_hidden dim) */
-    memcpy(embeddings, vis_embeds, (size_t)n_vis_tokens * hidden * sizeof(float));
+    const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
+    int pos = 0;
+
+    /* Vision embeddings — scale by sqrt(hidden) to match text embedding magnitude */
+    for (int i = 0; i < n_vis_tokens * hidden; i++)
+        vis_embeds[i] *= embed_scale;
+    memcpy(embeddings + (size_t)pos * hidden, vis_embeds,
+           (size_t)n_vis_tokens * hidden * sizeof(float));
     free(vis_embeds);
+    pos += n_vis_tokens;
 
     /* Text token embeddings (Gemma scaling: multiply by sqrt(dim)) */
-    const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
     for (int i = 0; i < n_prompt_tokens; i++) {
-        float *dst = embeddings + (size_t)(n_vis_tokens + i) * hidden;
+        float *dst = embeddings + (size_t)(pos + i) * hidden;
         tok_embed_bf16_to_f32(dst, tok_emb, prompt_tokens[i], hidden);
         for (int d = 0; d < hidden; d++)
             dst[d] *= embed_scale;
