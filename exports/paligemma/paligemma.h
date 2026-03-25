@@ -48,6 +48,7 @@ typedef struct {
 
     /* Derived */
     int num_image_tokens;      /* (image_size / patch_size)^2 = 256 */
+    int is_gemma2;             /* 1 if text_config.model_type == "gemma2" */
 } paligemma_config_t;
 
 /* ========================================================================
