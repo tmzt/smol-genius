@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-int smol_verbose = 1;
+extern int smol_verbose;
 
 /* Token ID streaming callback: print each token ID as it's decoded */
 static void stream_token_id(int token_id, void *userdata) {

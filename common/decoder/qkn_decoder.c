@@ -41,6 +41,12 @@ static float *load_f32_optional(multi_safetensors_t *ms, const char *name) {
     return safetensors_get_f32(sf, t);
 }
 
+static inline uint16_t f32_to_bf16(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return (uint16_t)(u >> 16);
+}
+
 static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
     safetensors_file_t *sf = NULL;
     const safetensor_t *t = multi_safetensors_find(ms, name, &sf);
@@ -48,7 +54,21 @@ static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
         fprintf(stderr, "qkn_decoder: weight not found: %s\n", name);
         return NULL;
     }
-    return safetensors_get_bf16_direct(sf, t);
+    /* BF16: return direct mmap pointer */
+    if (t->dtype == DTYPE_BF16)
+        return safetensors_get_bf16_direct(sf, t);
+    /* F32: convert to bf16 (allocate) */
+    if (t->dtype == DTYPE_F32) {
+        int64_t n = safetensor_numel(t);
+        if (n <= 0) return NULL;
+        uint16_t *out = (uint16_t *)malloc((size_t)n * sizeof(uint16_t));
+        if (!out) return NULL;
+        const float *src = (const float *)safetensors_data(sf, t);
+        for (int64_t i = 0; i < n; i++) out[i] = f32_to_bf16(src[i]);
+        return out;
+    }
+    fprintf(stderr, "qkn_decoder: unsupported dtype %d for %s\n", t->dtype, name);
+    return NULL;
 }
 
 /* ========================================================================
@@ -62,7 +82,10 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
     /* Token embeddings (large, bf16 mmap direct) */
     snprintf(name, sizeof(name), "%s.embed_tokens.weight", prefix);
     dec->tok_embeddings_bf16 = load_bf16_direct(ms, name);
-    if (!dec->tok_embeddings_bf16) return -1;
+    if (!dec->tok_embeddings_bf16) {
+        fprintf(stderr, "qkn_decoder: embed_tokens failed\n");
+        return -1;
+    }
 
     /* Transformer layers */
     for (int i = 0; i < cfg->dec_layers; i++) {
@@ -78,11 +101,11 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
         snprintf(name, sizeof(name), "%s.layers.%d.self_attn.o_proj.weight", prefix, i);
         l->wo_weight_bf16 = load_bf16_direct(ms, name);
 
-        /* Per-head Q/K RMSNorm weights */
+        /* Per-head Q/K RMSNorm weights (Gemma 2/3 only, optional in Gemma 1) */
         snprintf(name, sizeof(name), "%s.layers.%d.self_attn.q_norm.weight", prefix, i);
-        l->q_norm_weight = load_f32(ms, name);
+        l->q_norm_weight = load_f32_optional(ms, name);
         snprintf(name, sizeof(name), "%s.layers.%d.self_attn.k_norm.weight", prefix, i);
-        l->k_norm_weight = load_f32(ms, name);
+        l->k_norm_weight = load_f32_optional(ms, name);
 
         /* RMSNorm weights */
         snprintf(name, sizeof(name), "%s.layers.%d.input_layernorm.weight", prefix, i);
@@ -129,7 +152,10 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
     /* Final RMSNorm */
     snprintf(name, sizeof(name), "%s.norm.weight", prefix);
     dec->norm = load_f32(ms, name);
-    if (!dec->norm) return -1;
+    if (!dec->norm) {
+        fprintf(stderr, "qkn_decoder: final norm failed\n");
+        return -1;
+    }
 
     return 0;
 }
