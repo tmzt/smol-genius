@@ -445,18 +445,30 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
                    v + s * kv_dim, kv_dim * sizeof(float));
         }
 
-        /* Attention — sliding window or full causal */
+        /* Attention — sliding window or full causal, with optional softcap */
         int total_seq = start_pos + seq_len;
         float *full_k = kv_cache_k_at(ctx, layer, 0);
         float *full_v = kv_cache_v_at(ctx, layer, 0);
-        if (l->is_sliding && cfg->sliding_window > 0)
-            smol_sliding_window_attention(attn_out, q, full_k, full_v,
-                                           seq_len, total_seq, n_heads, n_kv_heads,
-                                           head_dim, scale, start_pos, cfg->sliding_window);
-        else
-            smol_causal_attention(attn_out, q, full_k, full_v,
-                                   seq_len, total_seq, n_heads, n_kv_heads,
-                                   head_dim, scale, start_pos);
+        float acap = cfg->attn_logit_softcap;
+        if (l->is_sliding && cfg->sliding_window > 0) {
+            if (acap > 0.0f)
+                smol_sliding_window_attention_softcap(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos, cfg->sliding_window, acap);
+            else
+                smol_sliding_window_attention(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos, cfg->sliding_window);
+        } else {
+            if (acap > 0.0f)
+                smol_causal_attention_softcap(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos, acap);
+            else
+                smol_causal_attention(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos);
+        }
 
         /* Output projection */
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16,
@@ -578,14 +590,26 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
         float *full_k = kv_cache_k_at(ctx, layer, 0);
         float *full_v = kv_cache_v_at(ctx, layer, 0);
 
-        if (l->is_sliding && cfg->sliding_window > 0)
-            smol_sliding_window_attention(attn_out, q, full_k, full_v,
-                                           1, total_seq, n_heads, n_kv_heads,
-                                           head_dim, scale, pos, cfg->sliding_window);
-        else
-            smol_causal_attention(attn_out, q, full_k, full_v,
-                                   1, total_seq, n_heads, n_kv_heads,
-                                   head_dim, scale, pos);
+        float acap2 = cfg->attn_logit_softcap;
+        if (l->is_sliding && cfg->sliding_window > 0) {
+            if (acap2 > 0.0f)
+                smol_sliding_window_attention_softcap(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos, cfg->sliding_window, acap2);
+            else
+                smol_sliding_window_attention(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos, cfg->sliding_window);
+        } else {
+            if (acap2 > 0.0f)
+                smol_causal_attention_softcap(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos, acap2);
+            else
+                smol_causal_attention(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos);
+        }
 
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16, 1, q_dim, dim);
 

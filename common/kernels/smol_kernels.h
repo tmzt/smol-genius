@@ -123,6 +123,20 @@ void smol_sliding_window_attention(float *out, const float *Q, const float *K,
                                     int n_heads, int n_kv_heads, int head_dim,
                                     float scale, int q_offset, int window_size);
 
+/* Softcapped variants (Gemma 2): score = cap * tanhf(score / cap) */
+__attribute__((visibility("default")))
+void smol_causal_attention_softcap(float *out, const float *Q, const float *K,
+                                    const float *V, int seq_q, int seq_k,
+                                    int n_heads, int n_kv_heads, int head_dim,
+                                    float scale, int q_offset, float cap);
+
+__attribute__((visibility("default")))
+void smol_sliding_window_attention_softcap(float *out, const float *Q, const float *K,
+                                            const float *V, int seq_q, int seq_k,
+                                            int n_heads, int n_kv_heads, int head_dim,
+                                            float scale, int q_offset, int window_size,
+                                            float cap);
+
 /* ========================================================================
  * Position Embeddings
  * ======================================================================== */

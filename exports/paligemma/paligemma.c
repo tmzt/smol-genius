@@ -194,13 +194,24 @@ paligemma_ctx_t *paligemma_load(const char *model_dir) {
     ctx->dec_config.dec_intermediate = ctx->config.dec_intermediate;
     ctx->dec_config.vocab_size = ctx->config.vocab_size;
     ctx->dec_config.dec_rms_norm_eps = ctx->config.dec_rms_norm_eps;
-    ctx->dec_config.dec_rope_theta = ctx->config.dec_rope_theta;
-    ctx->dec_config.dec_rope_local_theta = 0.0f;
-    ctx->dec_config.sliding_window = 0;
-    ctx->dec_config.sliding_window_pattern = 0;
-    /* PaliGemma 1 uses GEGLU + interleaved RoPE (Gemma 1 architecture) */
+    ctx->dec_config.dec_rope_theta = 1e6f; /* Gemma 2: full attention layers use 1M theta */
+    /* Gemma 2 architecture: sliding window, interleaved RoPE, GEGLU */
+    ctx->dec_config.dec_rope_local_theta = 10000.0f;
+    ctx->dec_config.sliding_window = 4096;
+    ctx->dec_config.sliding_window_pattern = 6;
     ctx->dec_config.activation = QKN_ACT_GEGLU;
     ctx->dec_config.rope_type = QKN_ROPE_INTERLEAVED;
+    ctx->dec_config.attn_logit_softcap = 50.0f;
+    ctx->dec_config.final_logit_softcap = 30.0f;
+
+    /* Set per-layer sliding window flags */
+    {
+        int pat = ctx->dec_config.sliding_window_pattern;
+        for (int i = 0; i < ctx->config.dec_layers; i++) {
+            ctx->dec_ctx.decoder.layers[i].is_sliding =
+                (pat > 0 && ((i + 1) % pat) != 0) ? 1 : 0;
+        }
+    }
 
     if (smol_verbose >= 1) {
         fprintf(stderr, "PaliGemma: vision %d layers (hidden=%d), decoder %d layers (hidden=%d)\n",

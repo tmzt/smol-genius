@@ -87,6 +87,8 @@ typedef struct {
     float dec_rope_local_theta; /* RoPE theta for sliding window layers (0 = same as dec_rope_theta) */
     int   sliding_window;       /* 0 = disabled, >0 = window size */
     int   sliding_window_pattern; /* every Nth layer is full attention (0 = all full) */
+    float attn_logit_softcap;   /* 0 = disabled, >0 = softcap value (e.g. 50.0 for Gemma 2) */
+    float final_logit_softcap;  /* 0 = disabled, >0 = softcap on final logits (e.g. 30.0) */
 } qkn_config_t;
 
 typedef struct {
