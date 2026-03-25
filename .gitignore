@@ -18,3 +18,5 @@ Qwen3-ASR
 TODO.md
 wakewords/
 tools/compile_wakewords
+*.dSYM
+paligemma_test
