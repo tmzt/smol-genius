@@ -137,6 +137,7 @@ static int load_config(paligemma_config_t *cfg, const char *model_dir) {
         cfg->dec_rms_norm_eps = (float)json_float(tc, "rms_norm_eps", 1e-6);
         cfg->dec_rope_theta = (float)json_float(tc, "rope_theta", 10000.0);
         int hd = json_int(tc, "head_dim", 0);
+        if (hd <= 0) hd = json_int(tc, "query_pre_attn_scalar", 0);
         cfg->dec_head_dim = hd > 0 ? hd : cfg->dec_hidden / cfg->dec_heads;
     } else {
         /* PaliGemma 3B defaults (Gemma 2B decoder) */
