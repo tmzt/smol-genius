@@ -19,6 +19,7 @@
 #include "paligemma.h"
 #include "../../common/kernels/smol_kernels.h"
 #include "../../common/utils/safetensors.h"
+#include "../../common/utils/hf_tokenizer.h"
 #include "../../common/vision/image.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -384,6 +385,10 @@ void paligemma_free(paligemma_ctx_t *ctx) {
         }
     }
 
+    /* Tokenizer */
+    if (ctx->_hf_tok)
+        hf_tokenizer_free((hf_tokenizer_t *)ctx->_hf_tok);
+
     /* Safetensors */
     if (ctx->safetensors)
         multi_safetensors_close(ctx->safetensors);
@@ -541,4 +546,110 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
     ctx->perf_decode_ms = t_end - t_dec_start;
 
     return n_generated;
+}
+
+/* ========================================================================
+ * High-level text generation (tokenizes prompt, decodes output to string)
+ * ======================================================================== */
+
+/* Accumulator for token callback */
+typedef struct {
+    int *ids;
+    int count;
+    int cap;
+} token_accum_t;
+
+static void accum_token_cb(int token_id, void *userdata) {
+    token_accum_t *acc = (token_accum_t *)userdata;
+    if (acc->count >= acc->cap) {
+        acc->cap = acc->cap ? acc->cap * 2 : 256;
+        acc->ids = (int *)realloc(acc->ids, (size_t)acc->cap * sizeof(int));
+    }
+    acc->ids[acc->count++] = token_id;
+}
+
+char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
+                              const char *prompt, int max_tokens) {
+    if (!ctx) return NULL;
+
+    /* Load tokenizer lazily */
+    if (!ctx->vocab_loaded) {
+        hf_tokenizer_t *tok = hf_tokenizer_load(ctx->model_dir);
+        if (tok) {
+            ctx->vocab = tok->id_to_text;
+            ctx->vocab_loaded = 1;
+            /* Keep the tokenizer around — we need encode too */
+            ctx->_hf_tok = tok;
+        }
+    }
+
+    /* Tokenize prompt (or default to newline for captioning) */
+    int n_prompt_tokens = 0;
+    int *prompt_tokens = NULL;
+    int default_token = 108; /* \n in Gemma tokenizer */
+
+    if (prompt && prompt[0] && ctx->_hf_tok) {
+        prompt_tokens = hf_tokenizer_encode(ctx->_hf_tok, prompt, &n_prompt_tokens);
+    }
+    if (!prompt_tokens || n_prompt_tokens == 0) {
+        prompt_tokens = &default_token;
+        n_prompt_tokens = 1;
+    }
+
+    /* Set up token accumulator */
+    token_accum_t acc = { NULL, 0, 0 };
+    paligemma_token_cb old_cb = ctx->token_cb;
+    void *old_ud = ctx->token_cb_userdata;
+    ctx->token_cb = accum_token_cb;
+    ctx->token_cb_userdata = &acc;
+
+    /* Generate */
+    paligemma_generate(ctx, image_path, prompt_tokens, n_prompt_tokens, max_tokens);
+
+    /* Restore callback */
+    ctx->token_cb = old_cb;
+    ctx->token_cb_userdata = old_ud;
+
+    /* Free prompt tokens if we allocated them */
+    if (prompt_tokens != &default_token)
+        free(prompt_tokens);
+
+    /* Decode output tokens to string */
+    if (!acc.count) {
+        free(acc.ids);
+        return strdup("");
+    }
+
+    /* Compute total length */
+    size_t total_len = 0;
+    for (int i = 0; i < acc.count; i++) {
+        const char *piece = NULL;
+        if (ctx->vocab && acc.ids[i] >= 0 && acc.ids[i] < ctx->config.vocab_size)
+            piece = ctx->vocab[acc.ids[i]];
+        if (!piece && ctx->_hf_tok)
+            piece = hf_tokenizer_decode(ctx->_hf_tok, acc.ids[i]);
+        if (piece)
+            total_len += strlen(piece);
+    }
+
+    char *result = (char *)malloc(total_len + 1);
+    if (!result) { free(acc.ids); return NULL; }
+
+    char *p = result;
+    for (int i = 0; i < acc.count; i++) {
+        const char *piece = NULL;
+        if (ctx->vocab && acc.ids[i] >= 0 && acc.ids[i] < ctx->config.vocab_size)
+            piece = ctx->vocab[acc.ids[i]];
+        if (!piece && ctx->_hf_tok)
+            piece = hf_tokenizer_decode(ctx->_hf_tok, acc.ids[i]);
+        if (piece) {
+            size_t len = strlen(piece);
+            memcpy(p, piece, len);
+            p += len;
+        }
+    }
+    *p = '\0';
+
+    free(acc.ids);
+    return result;
 }

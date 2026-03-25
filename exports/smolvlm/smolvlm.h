@@ -138,10 +138,11 @@ typedef struct {
 typedef void (*smolvlm_token_cb)(const char *piece, void *userdata);
 
 /* ========================================================================
- * Tokenizer (opaque, defined in smolvlm_tokenizer.c)
+ * Tokenizer (shared HF tokenizer from common/utils/)
  * ======================================================================== */
 
-typedef struct smolvlm_tokenizer smolvlm_tokenizer_t;
+#include "../../common/utils/hf_tokenizer.h"
+typedef hf_tokenizer_t smolvlm_tokenizer_t;
 
 /* ========================================================================
  * Main Context
@@ -249,10 +250,10 @@ void smolvlm_decoder_prefill(smolvlm_ctx_t *ctx, const float *input_embeds, int 
 /* Decoder forward (single token, uses KV cache, returns greedy token ID) */
 int smolvlm_decoder_forward(smolvlm_ctx_t *ctx, const float *input_embed);
 
-/* Tokenizer API */
-smolvlm_tokenizer_t *smolvlm_tokenizer_load(const char *model_dir);
-void smolvlm_tokenizer_free(smolvlm_tokenizer_t *tok);
-int *smolvlm_tokenizer_encode(const smolvlm_tokenizer_t *tok, const char *text, int *out_n);
-const char *smolvlm_tokenizer_decode(const smolvlm_tokenizer_t *tok, int token_id);
+/* Tokenizer API — provided by hf_tokenizer via macros in smolvlm_tokenizer.h */
+#define smolvlm_tokenizer_load   hf_tokenizer_load
+#define smolvlm_tokenizer_decode hf_tokenizer_decode
+#define smolvlm_tokenizer_encode hf_tokenizer_encode
+#define smolvlm_tokenizer_free   hf_tokenizer_free
 
 #endif /* SMOLVLM_H */

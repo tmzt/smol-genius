@@ -97,6 +97,11 @@ typedef struct {
     int eos_token;
     int image_token;   /* placeholder token ID for image positions */
 
+    /* Tokenizer (loaded lazily by paligemma_generate_text) */
+    char **vocab;       /* [vocab_size] token ID -> string */
+    int vocab_loaded;
+    void *_hf_tok;      /* hf_tokenizer_t*, kept for encode/decode */
+
     /* Performance stats */
     double perf_total_ms;
     int perf_tokens;
@@ -126,6 +131,13 @@ __attribute__((visibility("default")))
 int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
                        const int *prompt_tokens, int n_prompt_tokens,
                        int max_tokens);
+
+/* High-level: generate text from image + string prompt.
+ * Returns malloc'd string (caller must free). Handles tokenization internally.
+ * If prompt is NULL, uses "\n" for captioning. */
+__attribute__((visibility("default")))
+char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
+                              const char *prompt, int max_tokens);
 
 /* ========================================================================
  * Internal Functions (used across translation units)
