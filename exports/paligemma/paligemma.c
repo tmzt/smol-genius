@@ -245,33 +245,9 @@ paligemma_ctx_t *paligemma_load(const char *model_dir) {
     }
     ctx->dec_ctx.config = ctx->dec_config;
 
-    /* Gemma convention: RMSNorm uses (1 + weight) instead of weight.
-     * Add 1.0 to all loaded norm weights so the standard kernel works. */
-    {
-        int dim = ctx->config.dec_hidden;
-        int hdim = ctx->config.dec_head_dim;
-        qkn_decoder_t *dec = &ctx->dec_ctx.decoder;
-
-        /* Final norm */
-        if (dec->norm)
-            for (int i = 0; i < dim; i++) dec->norm[i] += 1.0f;
-
-        for (int l = 0; l < ctx->config.dec_layers; l++) {
-            qkn_dec_layer_t *layer = &dec->layers[l];
-            if (layer->input_norm)
-                for (int i = 0; i < dim; i++) layer->input_norm[i] += 1.0f;
-            if (layer->post_attn_norm)
-                for (int i = 0; i < dim; i++) layer->post_attn_norm[i] += 1.0f;
-            if (layer->pre_ffn_norm)
-                for (int i = 0; i < dim; i++) layer->pre_ffn_norm[i] += 1.0f;
-            if (layer->post_ffn_norm)
-                for (int i = 0; i < dim; i++) layer->post_ffn_norm[i] += 1.0f;
-            if (layer->q_norm_weight)
-                for (int i = 0; i < hdim; i++) layer->q_norm_weight[i] += 1.0f;
-            if (layer->k_norm_weight)
-                for (int i = 0; i < hdim; i++) layer->k_norm_weight[i] += 1.0f;
-        }
-    }
+    /* NOTE: HuggingFace PaliGemma checkpoints use standard RMSNorm weights
+     * (NOT the Gemma native (1+weight) convention). Do NOT add 1.0 here.
+     * The Gemma standalone export does the +1 because it reads native weights. */
 
     /* Special tokens (PaliGemma uses Gemma tokenizer) */
     ctx->bos_token = 2;
