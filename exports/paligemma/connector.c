@@ -37,24 +37,12 @@ static float *load_bf16_as_f32(multi_safetensors_t *ms, const char *name) {
         fprintf(stderr, "paligemma vision: weight not found: %s\n", name);
         return NULL;
     }
-    uint16_t *bf16 = safetensors_get_bf16_direct(sf, t);
-    if (!bf16) return NULL;
-
-    size_t n = 1;
-    for (int i = 0; i < t->ndim; i++) n *= t->shape[i];
-
-    float *f32 = (float *)malloc(n * sizeof(float));
-    if (!f32) return NULL;
-
-    uint32_t *d = (uint32_t *)(void *)f32;
-    for (size_t i = 0; i < n; i++)
-        d[i] = ((uint32_t)bf16[i]) << 16;
-
-    return f32;
+    /* Use safetensors_get_f32 which handles unaligned mmap data correctly */
+    return safetensors_get_f32(sf, t);
 }
 
 /* Try f32 first, fall back to bf16->f32 conversion */
-static float *load_auto_f32(multi_safetensors_t *ms, const char *name) {
+static float *load_auto_f32_impl(multi_safetensors_t *ms, const char *name) {
     safetensors_file_t *sf = NULL;
     const safetensor_t *t = multi_safetensors_find(ms, name, &sf);
     if (!t) {
@@ -64,6 +52,10 @@ static float *load_auto_f32(multi_safetensors_t *ms, const char *name) {
     if (safetensor_is_bf16(t))
         return load_bf16_as_f32(ms, name);
     return safetensors_get_f32(sf, t);
+}
+
+static float *load_auto_f32(multi_safetensors_t *ms, const char *name) {
+    return load_auto_f32_impl(ms, name);
 }
 
 /* ========================================================================
