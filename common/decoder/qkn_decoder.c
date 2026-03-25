@@ -140,6 +140,11 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
             int hidden = cfg->dec_hidden;
             size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
             l->gate_up_fused_bf16 = (uint16_t *)malloc(2 * (size_t)inter * row_bytes);
+            if (!l->gate_up_fused_bf16) {
+                fprintf(stderr, "qkn_decoder: OOM allocating gate_up_fused for layer %d (%zu bytes)\n",
+                        i, 2 * (size_t)inter * row_bytes);
+                return -1;
+            }
             for (int r = 0; r < inter; r++) {
                 memcpy(l->gate_up_fused_bf16 + (size_t)(2 * r) * hidden,
                        l->gate_weight_bf16 + (size_t)r * hidden, row_bytes);
