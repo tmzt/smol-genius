@@ -584,14 +584,17 @@ char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
         }
     }
 
-    /* Tokenize prompt (or default to newline for captioning) */
+    /* Tokenize prompt. PaliGemma uses short task prefixes like "caption en".
+     * If no prompt given, default to "caption en\n". */
     int n_prompt_tokens = 0;
     int *prompt_tokens = NULL;
-    int default_token = 108; /* \n in Gemma tokenizer */
+    const char *effective_prompt = (prompt && prompt[0]) ? prompt : "caption en";
 
-    if (prompt && prompt[0] && ctx->_hf_tok) {
-        prompt_tokens = hf_tokenizer_encode(ctx->_hf_tok, prompt, &n_prompt_tokens);
+    if (ctx->_hf_tok) {
+        prompt_tokens = hf_tokenizer_encode(ctx->_hf_tok, effective_prompt, &n_prompt_tokens);
     }
+    /* Fallback: just use newline token */
+    int default_token = 108;
     if (!prompt_tokens || n_prompt_tokens == 0) {
         prompt_tokens = &default_token;
         n_prompt_tokens = 1;
