@@ -430,8 +430,10 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
         smol_linear_nobias_bf16(v, x_norm, l->wv_weight_bf16, seq_len, dim, kv_dim);
 
         /* Per-head Q/K RMSNorm */
-        smol_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
-        smol_rms_norm_per_head(k, l->k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
+        if (l->q_norm_weight)
+            smol_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
+        if (l->k_norm_weight)
+            smol_rms_norm_per_head(k, l->k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
 
         /* Apply RoPE */
         apply_rope(q, rope_cos, rope_sin, seq_len, n_heads, head_dim);
@@ -576,8 +578,10 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
                                     dim, q_dim, kv_dim);
 
         /* Per-head Q/K RMSNorm */
-        smol_rms_norm_per_head(q, l->q_norm_weight, 1, n_heads, head_dim, eps);
-        smol_rms_norm_per_head(k, l->k_norm_weight, 1, n_kv_heads, head_dim, eps);
+        if (l->q_norm_weight)
+            smol_rms_norm_per_head(q, l->q_norm_weight, 1, n_heads, head_dim, eps);
+        if (l->k_norm_weight)
+            smol_rms_norm_per_head(k, l->k_norm_weight, 1, n_kv_heads, head_dim, eps);
 
         /* Apply RoPE */
         apply_rope(q, rope_cos, rope_sin, 1, n_heads, head_dim);
