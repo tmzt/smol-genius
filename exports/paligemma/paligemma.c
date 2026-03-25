@@ -584,20 +584,31 @@ char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
         }
     }
 
-    /* Tokenize prompt. PaliGemma uses short task prefixes like "caption en".
-     * If no prompt given, default to "caption en\n". */
-    int n_prompt_tokens = 0;
-    int *prompt_tokens = NULL;
-    const char *effective_prompt = (prompt && prompt[0]) ? prompt : "caption en";
+    /* PaliGemma prompt tokens. Hardcoded for known task prefixes since the
+     * GPT-2 BPE tokenizer doesn't handle Gemma's SentencePiece vocab.
+     * "caption en\n" = [139458, 1584, 108] in Gemma tokenizer */
+    int caption_tokens[] = {139458, 1584, 108}; /* "caption en\n" */
+    int describe_tokens[] = {8453, 108};         /* "describe\n" */
 
-    if (ctx->_hf_tok) {
-        prompt_tokens = hf_tokenizer_encode(ctx->_hf_tok, effective_prompt, &n_prompt_tokens);
-    }
-    /* Fallback: just use newline token */
-    int default_token = 108;
-    if (!prompt_tokens || n_prompt_tokens == 0) {
-        prompt_tokens = &default_token;
-        n_prompt_tokens = 1;
+    int n_prompt_tokens;
+    int *prompt_tokens;
+
+    if (!prompt || !prompt[0] || strstr(prompt, "caption")) {
+        prompt_tokens = caption_tokens;
+        n_prompt_tokens = 3;
+    } else if (strstr(prompt, "describe")) {
+        prompt_tokens = describe_tokens;
+        n_prompt_tokens = 2;
+    } else {
+        /* Try tokenizer for custom prompts, fall back to caption */
+        prompt_tokens = NULL;
+        n_prompt_tokens = 0;
+        if (ctx->_hf_tok)
+            prompt_tokens = hf_tokenizer_encode(ctx->_hf_tok, prompt, &n_prompt_tokens);
+        if (!prompt_tokens || n_prompt_tokens == 0) {
+            prompt_tokens = caption_tokens;
+            n_prompt_tokens = 3;
+        }
     }
 
     /* Set up token accumulator */
@@ -615,7 +626,7 @@ char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
     ctx->token_cb_userdata = old_ud;
 
     /* Free prompt tokens if we allocated them */
-    if (prompt_tokens != &default_token)
+    if (prompt_tokens != caption_tokens && prompt_tokens != describe_tokens)
         free(prompt_tokens);
 
     /* Decode output tokens to string */
