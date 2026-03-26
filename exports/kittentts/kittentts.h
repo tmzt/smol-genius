@@ -89,8 +89,11 @@ typedef struct {
     float *attn_ln_w;           /* [768] */
     float *attn_ln_b;           /* [768] */
     float *attn_q_w;            /* [768, 768] */
+    float *attn_q_b;            /* [768] */
     float *attn_k_w;            /* [768, 768] */
+    float *attn_k_b;            /* [768] */
     float *attn_v_w;            /* [768, 768] */
+    float *attn_v_b;            /* [768] */
     float *attn_o_w;            /* [768, 768] */
     float *attn_o_b;            /* [768] */
     float *ffn_ln_w;            /* [768] */

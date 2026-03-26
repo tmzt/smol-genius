@@ -60,8 +60,11 @@ static int load_plbert(ktts_plbert_t *m, multi_safetensors_t *ms) {
     m->attn_ln_w   = load_f32(ms, "plbert.layer.attn_ln.weight");
     m->attn_ln_b   = load_f32(ms, "plbert.layer.attn_ln.bias");
     m->attn_q_w    = load_f32(ms, "plbert.layer.attn.q.weight");
+    m->attn_q_b    = load_f32(ms, "plbert.layer.attn.q.bias");
     m->attn_k_w    = load_f32(ms, "plbert.layer.attn.k.weight");
+    m->attn_k_b    = load_f32(ms, "plbert.layer.attn.k.bias");
     m->attn_v_w    = load_f32(ms, "plbert.layer.attn.v.weight");
+    m->attn_v_b    = load_f32(ms, "plbert.layer.attn.v.bias");
     m->attn_o_w    = load_f32(ms, "plbert.layer.attn.o.weight");
     m->attn_o_b    = load_f32(ms, "plbert.layer.attn.o.bias");
 
@@ -151,7 +154,7 @@ static int load_prosody(ktts_prosody_t *m, multi_safetensors_t *ms) {
     m->dur_proj_w = load_f32(ms, "prosody.dur_proj.weight");
     m->dur_proj_b = load_f32(ms, "prosody.dur_proj.bias");
 
-    /* F0 predictor blocks */
+    /* F0 predictor blocks — AdaIN uses norm{1,2}.fc for style projection */
     for (int i = 0; i < 3; i++) {
         snprintf(name, sizeof(name), "prosody.f0.%d.conv1.weight", i);
         m->f0_blocks[i].conv1_w = load_f32(ms, name);
@@ -161,17 +164,17 @@ static int load_prosody(ktts_prosody_t *m, multi_safetensors_t *ms) {
         m->f0_blocks[i].conv2_w = load_f32(ms, name);
         snprintf(name, sizeof(name), "prosody.f0.%d.conv2.bias", i);
         m->f0_blocks[i].conv2_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.f0.%d.adain.weight", i);
+        snprintf(name, sizeof(name), "prosody.f0.%d.norm1.fc.weight", i);
         m->f0_blocks[i].adain_fc_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.f0.%d.adain.bias", i);
+        snprintf(name, sizeof(name), "prosody.f0.%d.norm1.fc.bias", i);
         m->f0_blocks[i].adain_fc_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.f0.%d.downsample.weight", i);
+        snprintf(name, sizeof(name), "prosody.f0.%d.conv1x1.weight", i);
         m->f0_blocks[i].downsample_w = try_load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.f0.%d.downsample.bias", i);
+        snprintf(name, sizeof(name), "prosody.f0.%d.pool.weight", i);
         m->f0_blocks[i].downsample_b = try_load_f32(ms, name);
     }
     m->f0_proj_w = load_f32(ms, "prosody.f0.proj.weight");
-    m->f0_proj_b = load_f32(ms, "prosody.f0.proj.bias");
+    m->f0_proj_b = try_load_f32(ms, "prosody.f0.proj.bias");
 
     /* N predictor blocks (same structure) */
     for (int i = 0; i < 3; i++) {
@@ -183,17 +186,17 @@ static int load_prosody(ktts_prosody_t *m, multi_safetensors_t *ms) {
         m->n_blocks[i].conv2_w = load_f32(ms, name);
         snprintf(name, sizeof(name), "prosody.n.%d.conv2.bias", i);
         m->n_blocks[i].conv2_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.n.%d.adain.weight", i);
+        snprintf(name, sizeof(name), "prosody.n.%d.norm1.fc.weight", i);
         m->n_blocks[i].adain_fc_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.n.%d.adain.bias", i);
+        snprintf(name, sizeof(name), "prosody.n.%d.norm1.fc.bias", i);
         m->n_blocks[i].adain_fc_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.n.%d.downsample.weight", i);
+        snprintf(name, sizeof(name), "prosody.n.%d.conv1x1.weight", i);
         m->n_blocks[i].downsample_w = try_load_f32(ms, name);
-        snprintf(name, sizeof(name), "prosody.n.%d.downsample.bias", i);
+        snprintf(name, sizeof(name), "prosody.n.%d.pool.weight", i);
         m->n_blocks[i].downsample_b = try_load_f32(ms, name);
     }
     m->n_proj_w = load_f32(ms, "prosody.n.proj.weight");
-    m->n_proj_b = load_f32(ms, "prosody.n.proj.bias");
+    m->n_proj_b = try_load_f32(ms, "prosody.n.proj.bias");
 
     if (!m->dur_lstm[0].W_ih_fwd || !m->dur_proj_w) return -1;
     return 0;
@@ -211,10 +214,10 @@ static int load_acoustic_decoder(ktts_acoustic_dec_t *m, multi_safetensors_t *ms
     m->enc_conv1_b = load_f32(ms, "decoder.encode.conv1.bias");
     m->enc_conv2_w = load_f32(ms, "decoder.encode.conv2.weight");
     m->enc_conv2_b = load_f32(ms, "decoder.encode.conv2.bias");
-    m->enc_adain_fc_w = load_f32(ms, "decoder.encode.adain.weight");
-    m->enc_adain_fc_b = load_f32(ms, "decoder.encode.adain.bias");
-    m->enc_skip_w = load_f32(ms, "decoder.encode.skip.weight");
-    m->enc_skip_b = load_f32(ms, "decoder.encode.skip.bias");
+    m->enc_adain_fc_w = load_f32(ms, "decoder.encode.norm1.fc.weight");
+    m->enc_adain_fc_b = load_f32(ms, "decoder.encode.norm1.fc.bias");
+    m->enc_skip_w = try_load_f32(ms, "decoder.encode.conv1x1.weight");
+    m->enc_skip_b = NULL; /* conv1x1 has no bias */
 
     char name[256];
     for (int i = 0; i < KTTS_DECODER_BLOCKS; i++) {
@@ -226,14 +229,13 @@ static int load_acoustic_decoder(ktts_acoustic_dec_t *m, multi_safetensors_t *ms
         m->dec_blocks[i].conv2_w = load_f32(ms, name);
         snprintf(name, sizeof(name), "decoder.decode.%d.conv2.bias", i);
         m->dec_blocks[i].conv2_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "decoder.decode.%d.adain.weight", i);
+        snprintf(name, sizeof(name), "decoder.decode.%d.norm1.fc.weight", i);
         m->dec_blocks[i].adain_fc_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "decoder.decode.%d.adain.bias", i);
+        snprintf(name, sizeof(name), "decoder.decode.%d.norm1.fc.bias", i);
         m->dec_blocks[i].adain_fc_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "decoder.decode.%d.skip.weight", i);
+        snprintf(name, sizeof(name), "decoder.decode.%d.conv1x1.weight", i);
         m->dec_blocks[i].skip_w = try_load_f32(ms, name);
-        snprintf(name, sizeof(name), "decoder.decode.%d.skip.bias", i);
-        m->dec_blocks[i].skip_b = try_load_f32(ms, name);
+        m->dec_blocks[i].skip_b = NULL;
     }
 
     if (!m->adapter_w || !m->enc_conv1_w) return -1;
@@ -252,23 +254,24 @@ static int load_vocoder(ktts_vocoder_t *m, multi_safetensors_t *ms) {
 
     char name[256];
     for (int i = 0; i < 4; i++) {
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.conv1.weight", i);
+        /* Vocoder resblocks use convs1.0/convs2.0 naming (3 dilated convs each) */
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.convs1.0.weight", i);
         m->resblocks[i].conv1_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.conv1.bias", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.convs1.0.bias", i);
         m->resblocks[i].conv1_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.conv2.weight", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.convs2.0.weight", i);
         m->resblocks[i].conv2_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.conv2.bias", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.convs2.0.bias", i);
         m->resblocks[i].conv2_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.conv3.weight", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.convs1.1.weight", i);
         m->resblocks[i].conv3_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.conv3.bias", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.convs1.1.bias", i);
         m->resblocks[i].conv3_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.adain.weight", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.adain1.0.fc.weight", i);
         m->resblocks[i].adain_fc_w = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.adain.bias", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.adain1.0.fc.bias", i);
         m->resblocks[i].adain_fc_b = load_f32(ms, name);
-        snprintf(name, sizeof(name), "vocoder.resblocks.%d.snake_alpha", i);
+        snprintf(name, sizeof(name), "vocoder.resblocks.%d.alpha1.0", i);
         m->resblocks[i].snake_alpha = load_f32(ms, name);
     }
 

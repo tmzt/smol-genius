@@ -65,10 +65,10 @@ void ktts_plbert_forward(const ktts_plbert_t *model, const int *token_ids,
         smol_layer_norm(x_norm, x, model->attn_ln_w, model->attn_ln_b,
                         seq_len, hidden, 1e-12f);
 
-        /* Q/K/V projections (no bias in ALBERT attention) */
-        smol_linear_nobias(q, x_norm, model->attn_q_w, seq_len, hidden, hidden);
-        smol_linear_nobias(k, x_norm, model->attn_k_w, seq_len, hidden, hidden);
-        smol_linear_nobias(v, x_norm, model->attn_v_w, seq_len, hidden, hidden);
+        /* Q/K/V projections */
+        smol_linear(q, x_norm, model->attn_q_w, model->attn_q_b, seq_len, hidden, hidden);
+        smol_linear(k, x_norm, model->attn_k_w, model->attn_k_b, seq_len, hidden, hidden);
+        smol_linear(v, x_norm, model->attn_v_w, model->attn_v_b, seq_len, hidden, hidden);
 
         /* Bidirectional self-attention */
         smol_bidirectional_attention(attn_out, q, k, v,

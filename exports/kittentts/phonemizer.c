@@ -137,6 +137,38 @@ int ktts_load_phoneme_vocab(const char *json_path, int *phoneme_map) {
  * Phonemization
  * ======================================================================== */
 
+/* Fallback: map ASCII characters directly to token IDs when espeak unavailable */
+static int phonemize_ascii_fallback(const char *text, const int *phoneme_map,
+                                     int *out_ids, int max_ids) {
+    int n = 0;
+    if (n >= max_ids) return -1;
+    out_ids[n++] = 0;  /* start pad */
+
+    const unsigned char *p = (const unsigned char *)text;
+    while (*p && n < max_ids - 2) {
+        unsigned char c = *p;
+        /* Map space */
+        if (c == ' ') {
+            int id = phoneme_map[' '];
+            if (id >= 0) out_ids[n++] = id;
+            p++;
+            continue;
+        }
+        /* Map lowercase letters (phoneme vocab has a-z at 132-157) */
+        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a'; /* lowercase */
+        int id = phoneme_map[c];
+        if (id >= 0) {
+            out_ids[n++] = id;
+        }
+        p++;
+    }
+
+    if (n >= max_ids - 1) n = max_ids - 2;
+    out_ids[n++] = 10; /* end marker */
+    out_ids[n++] = 0;  /* trailing pad */
+    return n;
+}
+
 int ktts_phonemize(const char *text, const int *phoneme_map,
                    int *out_ids, int max_ids) {
 #ifdef ENABLE_ESPEAK
@@ -185,7 +217,7 @@ int ktts_phonemize(const char *text, const int *phoneme_map,
 
     return n;
 #else
-    (void)text; (void)phoneme_map; (void)out_ids; (void)max_ids;
-    return -1;
+    /* No espeak: use ASCII fallback */
+    return phonemize_ascii_fallback(text, phoneme_map, out_ids, max_ids);
 #endif
 }
