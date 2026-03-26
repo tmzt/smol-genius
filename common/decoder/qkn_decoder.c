@@ -401,6 +401,16 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
 
     memcpy(x, input_embeds, (size_t)seq_len * dim * sizeof(float));
 
+    /* Debug: dump pre-normalizer state */
+    if (smol_verbose >= 2) {
+        float *last = x + (size_t)(seq_len - 1) * dim;
+        float sum = 0, sum2 = 0;
+        for (int d = 0; d < dim; d++) { sum += last[d]; sum2 += last[d] * last[d]; }
+        float mean = sum / dim, std_val = sqrtf(sum2 / dim - mean * mean);
+        fprintf(stderr, "[C] PRE-norm: last_pos mean=%.6f std=%.6f [0:4]=[%.6f,%.6f,%.6f,%.6f]\n",
+                mean, std_val, last[0], last[1], last[2], last[3]);
+    }
+
     /* Gemma normalizer: multiply all embeddings by sqrt(hidden_size) */
     if (cfg->embed_normalizer > 0.0f) {
         float norm = cfg->embed_normalizer;
@@ -421,6 +431,18 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
 
     for (int layer = 0; layer < cfg->dec_layers; layer++) {
         qkn_dec_layer_t *l = &dec->layers[layer];
+
+        /* Debug: dump hidden state at position 257 (last prefill pos) */
+        if (smol_verbose >= 2 && layer < 3) {
+            int dpos = seq_len - 1;
+            float *p = x + (size_t)dpos * dim;
+            float sum = 0, sum2 = 0;
+            for (int d = 0; d < dim; d++) { sum += p[d]; sum2 += p[d] * p[d]; }
+            float mean = sum / dim;
+            float std_val = sqrtf(sum2 / dim - mean * mean);
+            fprintf(stderr, "[C] layer %d pos %d: mean=%.6f std=%.6f [0:4]=[%.6f,%.6f,%.6f,%.6f]\n",
+                    layer, dpos + start_pos, mean, std_val, p[0], p[1], p[2], p[3]);
+        }
 
         /* Per-layer RoPE cache selection (sliding layers may use local theta) */
         const float *rope_cos, *rope_sin;

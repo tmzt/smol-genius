@@ -535,6 +535,21 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
         tok_embed_bf16_to_f32(dst, tok_emb, prompt_tokens[i], hidden);
     }
 
+    /* Debug: dump assembled embeddings for last text token */
+    if (smol_verbose >= 2) {
+        int last_idx = total_seq - 1;
+        float *last = embeddings + (size_t)last_idx * hidden;
+        fprintf(stderr, "  [asm] last text embed (pos %d, tok %d) [0:8]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+                last_idx, prompt_tokens[n_prompt_tokens - 1],
+                last[0], last[1], last[2], last[3], last[4], last[5], last[6], last[7]);
+        /* Also dump raw embed separately */
+        float tmp[8];
+        tok_embed_bf16_to_f32(tmp, tok_emb, prompt_tokens[n_prompt_tokens - 1], 8);
+        fprintf(stderr, "  [raw] direct embed tok %d [0:8]: %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+                prompt_tokens[n_prompt_tokens - 1],
+                tmp[0], tmp[1], tmp[2], tmp[3], tmp[4], tmp[5], tmp[6], tmp[7]);
+    }
+
     /* ---- Reset KV cache and run decoder ---- */
     qkn_kv_cache_reset(&ctx->dec_ctx);
 
@@ -619,11 +634,10 @@ char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
         }
     }
 
-    /* PaliGemma prompt tokens. Hardcoded for known task prefixes since the
-     * GPT-2 BPE tokenizer doesn't handle Gemma's SentencePiece vocab.
-     * "caption en\n" = [139458, 1584, 108] in Gemma tokenizer */
-    int caption_tokens[] = {139458, 1584, 108}; /* "caption en\n" */
-    int describe_tokens[] = {8453, 108};         /* "describe\n" */
+    /* PaliGemma prompt tokens (Gemma 2 SentencePiece tokenizer).
+     * Verified against HF AutoTokenizer for google/paligemma2-3b-mix-224. */
+    int caption_tokens[] = {21209, 659, 108};    /* "caption en\n" */
+    int describe_tokens[] = {15019, 108};         /* "describe\n" */
 
     int n_prompt_tokens;
     int *prompt_tokens;
