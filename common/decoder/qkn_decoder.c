@@ -401,6 +401,12 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
 
     memcpy(x, input_embeds, (size_t)seq_len * dim * sizeof(float));
 
+    /* Gemma normalizer: multiply all embeddings by sqrt(hidden_size) */
+    if (cfg->embed_normalizer > 0.0f) {
+        float norm = cfg->embed_normalizer;
+        for (int i = 0; i < seq_len * dim; i++) x[i] *= norm;
+    }
+
     int start_pos = ctx->kv_cache_len;
     if (ensure_rope_caches(ctx, start_pos + seq_len) != 0) return;
 
@@ -541,6 +547,12 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
     float *gate_buf = ctx->dec_gate;
     float *ffn_out = ctx->dec_ffn_out;
     memcpy(x, input_embed, dim * sizeof(float));
+
+    /* Gemma normalizer */
+    if (cfg->embed_normalizer > 0.0f) {
+        float norm = cfg->embed_normalizer;
+        for (int i = 0; i < dim; i++) x[i] *= norm;
+    }
 
     int pos = ctx->kv_cache_len;
 

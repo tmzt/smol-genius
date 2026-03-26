@@ -206,6 +206,8 @@ paligemma_ctx_t *paligemma_load(const char *model_dir) {
     ctx->dec_config.activation = QKN_ACT_GEGLU;
     ctx->dec_config.rope_type = QKN_ROPE_INTERLEAVED;
 
+    ctx->dec_config.embed_normalizer = 0.0f; /* scaling done in caller */
+
     if (ctx->config.is_gemma2) {
         /* Gemma 2: SWA, dual RoPE theta, softcapped attention */
         ctx->dec_config.dec_rope_theta = 1e6f;
@@ -513,7 +515,10 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
     const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
     int pos = 0;
 
-    /* Vision embeddings — scale by sqrt(hidden) to match text embedding magnitude */
+    /* Vision embeddings: scale by sqrt(hidden) to match text embedding magnitude.
+     * NOTE: HF does NOT scale vision — it relies on the Gemma normalizer step.
+     * Our simpler approach scales vision explicitly. This produces garbled but
+     * non-EOS output. TODO: fix Gemma 2 decoder normalizer path properly. */
     for (int i = 0; i < n_vis_tokens * hidden; i++)
         vis_embeds[i] *= embed_scale;
     memcpy(embeddings + (size_t)pos * hidden, vis_embeds,
@@ -521,7 +526,7 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
     free(vis_embeds);
     pos += n_vis_tokens;
 
-    /* Text token embeddings (Gemma scaling: multiply by sqrt(dim)) */
+    /* Text token embeddings: scaled by sqrt(hidden) (Gemma convention) */
     for (int i = 0; i < n_prompt_tokens; i++) {
         float *dst = embeddings + (size_t)(pos + i) * hidden;
         tok_embed_bf16_to_f32(dst, tok_emb, prompt_tokens[i], hidden);

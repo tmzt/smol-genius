@@ -89,6 +89,7 @@ typedef struct {
     int   sliding_window_pattern; /* every Nth layer is full attention (0 = all full) */
     float attn_logit_softcap;   /* 0 = disabled, >0 = softcap value (e.g. 50.0 for Gemma 2) */
     float final_logit_softcap;  /* 0 = disabled, >0 = softcap on final logits (e.g. 30.0) */
+    float embed_normalizer;     /* 0 = disabled, >0 = multiply input embeds (Gemma: sqrt(hidden)) */
 } qkn_config_t;
 
 typedef struct {
