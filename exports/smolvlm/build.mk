@@ -6,7 +6,6 @@ ENABLE_VISION = 1
 LTO_SRCS += exports/smolvlm/connector.c
 LTO_SRCS += exports/smolvlm/decoder.c
 SRCS += exports/smolvlm/smolvlm.c
-SRCS += exports/smolvlm/smolvlm_tokenizer.c
 CFLAGS += -DENABLE_SMOLVLM
 TEST_TARGETS += test-smolvlm
 

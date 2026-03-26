@@ -41,6 +41,12 @@ static float *load_f32_optional(multi_safetensors_t *ms, const char *name) {
     return safetensors_get_f32(sf, t);
 }
 
+static inline uint16_t f32_to_bf16(float f) {
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    return (uint16_t)(u >> 16);
+}
+
 static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
     safetensors_file_t *sf = NULL;
     const safetensor_t *t = multi_safetensors_find(ms, name, &sf);
@@ -48,7 +54,21 @@ static uint16_t *load_bf16_direct(multi_safetensors_t *ms, const char *name) {
         fprintf(stderr, "qkn_decoder: weight not found: %s\n", name);
         return NULL;
     }
-    return safetensors_get_bf16_direct(sf, t);
+    /* BF16: return direct mmap pointer */
+    if (t->dtype == DTYPE_BF16)
+        return safetensors_get_bf16_direct(sf, t);
+    /* F32: convert to bf16 (allocate) */
+    if (t->dtype == DTYPE_F32) {
+        int64_t n = safetensor_numel(t);
+        if (n <= 0) return NULL;
+        uint16_t *out = (uint16_t *)malloc((size_t)n * sizeof(uint16_t));
+        if (!out) return NULL;
+        const float *src = (const float *)safetensors_data(sf, t);
+        for (int64_t i = 0; i < n; i++) out[i] = f32_to_bf16(src[i]);
+        return out;
+    }
+    fprintf(stderr, "qkn_decoder: unsupported dtype %d for %s\n", t->dtype, name);
+    return NULL;
 }
 
 /* ========================================================================
@@ -62,7 +82,10 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
     /* Token embeddings (large, bf16 mmap direct) */
     snprintf(name, sizeof(name), "%s.embed_tokens.weight", prefix);
     dec->tok_embeddings_bf16 = load_bf16_direct(ms, name);
-    if (!dec->tok_embeddings_bf16) return -1;
+    if (!dec->tok_embeddings_bf16) {
+        fprintf(stderr, "qkn_decoder: embed_tokens failed\n");
+        return -1;
+    }
 
     /* Transformer layers */
     for (int i = 0; i < cfg->dec_layers; i++) {
@@ -78,11 +101,11 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
         snprintf(name, sizeof(name), "%s.layers.%d.self_attn.o_proj.weight", prefix, i);
         l->wo_weight_bf16 = load_bf16_direct(ms, name);
 
-        /* Per-head Q/K RMSNorm weights */
+        /* Per-head Q/K RMSNorm weights (Gemma 2/3 only, optional in Gemma 1) */
         snprintf(name, sizeof(name), "%s.layers.%d.self_attn.q_norm.weight", prefix, i);
-        l->q_norm_weight = load_f32(ms, name);
+        l->q_norm_weight = load_f32_optional(ms, name);
         snprintf(name, sizeof(name), "%s.layers.%d.self_attn.k_norm.weight", prefix, i);
-        l->k_norm_weight = load_f32(ms, name);
+        l->k_norm_weight = load_f32_optional(ms, name);
 
         /* RMSNorm weights */
         snprintf(name, sizeof(name), "%s.layers.%d.input_layernorm.weight", prefix, i);
@@ -117,6 +140,11 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
             int hidden = cfg->dec_hidden;
             size_t row_bytes = (size_t)hidden * sizeof(uint16_t);
             l->gate_up_fused_bf16 = (uint16_t *)malloc(2 * (size_t)inter * row_bytes);
+            if (!l->gate_up_fused_bf16) {
+                fprintf(stderr, "qkn_decoder: OOM allocating gate_up_fused for layer %d (%zu bytes)\n",
+                        i, 2 * (size_t)inter * row_bytes);
+                return -1;
+            }
             for (int r = 0; r < inter; r++) {
                 memcpy(l->gate_up_fused_bf16 + (size_t)(2 * r) * hidden,
                        l->gate_weight_bf16 + (size_t)r * hidden, row_bytes);
@@ -129,7 +157,10 @@ int qkn_decoder_load(qkn_decoder_t *dec, multi_safetensors_t *ms,
     /* Final RMSNorm */
     snprintf(name, sizeof(name), "%s.norm.weight", prefix);
     dec->norm = load_f32(ms, name);
-    if (!dec->norm) return -1;
+    if (!dec->norm) {
+        fprintf(stderr, "qkn_decoder: final norm failed\n");
+        return -1;
+    }
 
     return 0;
 }
@@ -370,6 +401,22 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
 
     memcpy(x, input_embeds, (size_t)seq_len * dim * sizeof(float));
 
+    /* Debug: dump pre-normalizer state */
+    if (smol_verbose >= 2) {
+        float *last = x + (size_t)(seq_len - 1) * dim;
+        float sum = 0, sum2 = 0;
+        for (int d = 0; d < dim; d++) { sum += last[d]; sum2 += last[d] * last[d]; }
+        float mean = sum / dim, std_val = sqrtf(sum2 / dim - mean * mean);
+        fprintf(stderr, "[C] PRE-norm: last_pos mean=%.6f std=%.6f [0:4]=[%.6f,%.6f,%.6f,%.6f]\n",
+                mean, std_val, last[0], last[1], last[2], last[3]);
+    }
+
+    /* Gemma normalizer: multiply all embeddings by sqrt(hidden_size) */
+    if (cfg->embed_normalizer > 0.0f) {
+        float norm = cfg->embed_normalizer;
+        for (int i = 0; i < seq_len * dim; i++) x[i] *= norm;
+    }
+
     int start_pos = ctx->kv_cache_len;
     if (ensure_rope_caches(ctx, start_pos + seq_len) != 0) return;
 
@@ -384,6 +431,31 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
 
     for (int layer = 0; layer < cfg->dec_layers; layer++) {
         qkn_dec_layer_t *l = &dec->layers[layer];
+
+        /* Debug: dump hidden states */
+        if (smol_verbose >= 2 && layer == 0) {
+            /* Vision pos 0 */
+            fprintf(stderr, "[C] layer0_input[0,0:4]: %.6f %.6f %.6f %.6f\n",
+                    x[0], x[1], x[2], x[3]);
+            /* Text pos 256 */
+            float *t256 = x + (size_t)256 * dim;
+            fprintf(stderr, "[C] layer0_input[256,0:4]: %.6f %.6f %.6f %.6f\n",
+                    t256[0], t256[1], t256[2], t256[3]);
+            /* Text pos 257 */
+            float *t257 = x + (size_t)257 * dim;
+            fprintf(stderr, "[C] layer0_input[257,0:4]: %.6f %.6f %.6f %.6f\n",
+                    t257[0], t257[1], t257[2], t257[3]);
+        }
+        if (smol_verbose >= 2 && layer < 3) {
+            int dpos = seq_len - 1;
+            float *p = x + (size_t)dpos * dim;
+            float sum = 0, sum2 = 0;
+            for (int d = 0; d < dim; d++) { sum += p[d]; sum2 += p[d] * p[d]; }
+            float mean = sum / dim;
+            float std_val = sqrtf(sum2 / dim - mean * mean);
+            fprintf(stderr, "[C] layer %d pos %d: mean=%.6f std=%.6f [0:4]=[%.6f,%.6f,%.6f,%.6f]\n",
+                    layer, dpos + start_pos, mean, std_val, p[0], p[1], p[2], p[3]);
+        }
 
         /* Per-layer RoPE cache selection (sliding layers may use local theta) */
         const float *rope_cos, *rope_sin;
@@ -403,9 +475,20 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
         smol_linear_nobias_bf16(k, x_norm, l->wk_weight_bf16, seq_len, dim, kv_dim);
         smol_linear_nobias_bf16(v, x_norm, l->wv_weight_bf16, seq_len, dim, kv_dim);
 
+        /* Debug: dump Q at last position before RoPE */
+        if (smol_verbose >= 2 && layer == 0) {
+            int lp = seq_len - 1;
+            float *qp = q + (size_t)lp * q_dim;
+            float *xnp = x_norm + (size_t)lp * dim;
+            fprintf(stderr, "[C] L0 x_norm[%d,0:4]: %.6f %.6f %.6f %.6f\n", lp, xnp[0], xnp[1], xnp[2], xnp[3]);
+            fprintf(stderr, "[C] L0 Q[%d,0:4]: %.6f %.6f %.6f %.6f\n", lp, qp[0], qp[1], qp[2], qp[3]);
+        }
+
         /* Per-head Q/K RMSNorm */
-        smol_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
-        smol_rms_norm_per_head(k, l->k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
+        if (l->q_norm_weight)
+            smol_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);
+        if (l->k_norm_weight)
+            smol_rms_norm_per_head(k, l->k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
 
         /* Apply RoPE */
         apply_rope(q, rope_cos, rope_sin, seq_len, n_heads, head_dim);
@@ -419,18 +502,30 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
                    v + s * kv_dim, kv_dim * sizeof(float));
         }
 
-        /* Attention — sliding window or full causal */
+        /* Attention — sliding window or full causal, with optional softcap */
         int total_seq = start_pos + seq_len;
         float *full_k = kv_cache_k_at(ctx, layer, 0);
         float *full_v = kv_cache_v_at(ctx, layer, 0);
-        if (l->is_sliding && cfg->sliding_window > 0)
-            smol_sliding_window_attention(attn_out, q, full_k, full_v,
-                                           seq_len, total_seq, n_heads, n_kv_heads,
-                                           head_dim, scale, start_pos, cfg->sliding_window);
-        else
-            smol_causal_attention(attn_out, q, full_k, full_v,
-                                   seq_len, total_seq, n_heads, n_kv_heads,
-                                   head_dim, scale, start_pos);
+        float acap = cfg->attn_logit_softcap;
+        if (l->is_sliding && cfg->sliding_window > 0) {
+            if (acap > 0.0f)
+                smol_sliding_window_attention_softcap(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos, cfg->sliding_window, acap);
+            else
+                smol_sliding_window_attention(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos, cfg->sliding_window);
+        } else {
+            if (acap > 0.0f)
+                smol_causal_attention_softcap(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos, acap);
+            else
+                smol_causal_attention(attn_out, q, full_k, full_v,
+                    seq_len, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, start_pos);
+        }
 
         /* Output projection */
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16,
@@ -497,6 +592,12 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
     float *ffn_out = ctx->dec_ffn_out;
     memcpy(x, input_embed, dim * sizeof(float));
 
+    /* Gemma normalizer */
+    if (cfg->embed_normalizer > 0.0f) {
+        float norm = cfg->embed_normalizer;
+        for (int i = 0; i < dim; i++) x[i] *= norm;
+    }
+
     int pos = ctx->kv_cache_len;
 
     /* Init or grow KV cache if needed */
@@ -538,8 +639,10 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
                                     dim, q_dim, kv_dim);
 
         /* Per-head Q/K RMSNorm */
-        smol_rms_norm_per_head(q, l->q_norm_weight, 1, n_heads, head_dim, eps);
-        smol_rms_norm_per_head(k, l->k_norm_weight, 1, n_kv_heads, head_dim, eps);
+        if (l->q_norm_weight)
+            smol_rms_norm_per_head(q, l->q_norm_weight, 1, n_heads, head_dim, eps);
+        if (l->k_norm_weight)
+            smol_rms_norm_per_head(k, l->k_norm_weight, 1, n_kv_heads, head_dim, eps);
 
         /* Apply RoPE */
         apply_rope(q, rope_cos, rope_sin, 1, n_heads, head_dim);
@@ -552,14 +655,26 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
         float *full_k = kv_cache_k_at(ctx, layer, 0);
         float *full_v = kv_cache_v_at(ctx, layer, 0);
 
-        if (l->is_sliding && cfg->sliding_window > 0)
-            smol_sliding_window_attention(attn_out, q, full_k, full_v,
-                                           1, total_seq, n_heads, n_kv_heads,
-                                           head_dim, scale, pos, cfg->sliding_window);
-        else
-            smol_causal_attention(attn_out, q, full_k, full_v,
-                                   1, total_seq, n_heads, n_kv_heads,
-                                   head_dim, scale, pos);
+        float acap2 = cfg->attn_logit_softcap;
+        if (l->is_sliding && cfg->sliding_window > 0) {
+            if (acap2 > 0.0f)
+                smol_sliding_window_attention_softcap(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos, cfg->sliding_window, acap2);
+            else
+                smol_sliding_window_attention(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos, cfg->sliding_window);
+        } else {
+            if (acap2 > 0.0f)
+                smol_causal_attention_softcap(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos, acap2);
+            else
+                smol_causal_attention(attn_out, q, full_k, full_v,
+                    1, total_seq, n_heads, n_kv_heads,
+                    head_dim, scale, pos);
+        }
 
         smol_linear_nobias_bf16(proj_out, attn_out, l->wo_weight_bf16, 1, q_dim, dim);
 
@@ -593,5 +708,7 @@ int qkn_decoder_forward(qkn_ctx_t *ctx, const float *input_embed) {
 
     /* Final norm + streaming argmax (no logits buffer needed) */
     smol_rms_norm(x, x, dec->norm, 1, dim, eps);
+
+    /* Debug: dump top logits */
     return smol_argmax_matvec_bf16(x, dec->tok_embeddings_bf16, dim, cfg->vocab_size);
 }

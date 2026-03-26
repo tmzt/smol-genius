@@ -266,8 +266,15 @@ float *safetensors_get_f32(const safetensors_file_t *sf, const safetensor_t *t) 
             memcpy(out, data, n * sizeof(float));
             break;
         case DTYPE_BF16: {
-            const uint16_t *src = (const uint16_t *)data;
-            for (int64_t i = 0; i < n; i++) out[i] = bf16_to_f32(src[i]);
+            /* Handle potentially unaligned mmap data (odd header sizes).
+             * Copy entire BF16 block to aligned buffer first, then convert. */
+            size_t bf16_bytes = (size_t)n * 2;
+            uint16_t *aligned_bf16 = (uint16_t *)malloc(bf16_bytes);
+            if (!aligned_bf16) { free(out); return NULL; }
+            memcpy(aligned_bf16, data, bf16_bytes);
+            for (int64_t i = 0; i < n; i++)
+                out[i] = bf16_to_f32(aligned_bf16[i]);
+            free(aligned_bf16);
             break;
         }
         default:
@@ -283,7 +290,17 @@ int safetensor_is_bf16(const safetensor_t *t) {
 
 uint16_t *safetensors_get_bf16_direct(const safetensors_file_t *sf, const safetensor_t *t) {
     if (!sf || !t || t->dtype != DTYPE_BF16) return NULL;
-    return (uint16_t *)safetensors_data(sf, t);
+    const void *data = safetensors_data(sf, t);
+    /* If mmap pointer is 2-byte aligned, return directly (zero-copy) */
+    if (((uintptr_t)data & 1) == 0)
+        return (uint16_t *)data;
+    /* Unaligned: copy to an aligned buffer (safetensors with odd header sizes) */
+    int64_t n = safetensor_numel(t);
+    if (n <= 0) return NULL;
+    uint16_t *aligned = (uint16_t *)malloc((size_t)n * sizeof(uint16_t));
+    if (!aligned) return NULL;
+    memcpy(aligned, data, (size_t)n * sizeof(uint16_t));
+    return aligned;
 }
 
 void safetensor_print(const safetensor_t *t) {

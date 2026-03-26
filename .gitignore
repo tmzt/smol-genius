@@ -18,3 +18,8 @@ Qwen3-ASR
 TODO.md
 wakewords/
 tools/compile_wakewords
+*.dSYM
+paligemma_test
+libpaligemma_test.dylib
+libpaligemma_test.so
+paligemma_test
