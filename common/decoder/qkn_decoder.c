@@ -432,7 +432,20 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
     for (int layer = 0; layer < cfg->dec_layers; layer++) {
         qkn_dec_layer_t *l = &dec->layers[layer];
 
-        /* Debug: dump hidden state at position 257 (last prefill pos) */
+        /* Debug: dump hidden states */
+        if (smol_verbose >= 2 && layer == 0) {
+            /* Vision pos 0 */
+            fprintf(stderr, "[C] layer0_input[0,0:4]: %.6f %.6f %.6f %.6f\n",
+                    x[0], x[1], x[2], x[3]);
+            /* Text pos 256 */
+            float *t256 = x + (size_t)256 * dim;
+            fprintf(stderr, "[C] layer0_input[256,0:4]: %.6f %.6f %.6f %.6f\n",
+                    t256[0], t256[1], t256[2], t256[3]);
+            /* Text pos 257 */
+            float *t257 = x + (size_t)257 * dim;
+            fprintf(stderr, "[C] layer0_input[257,0:4]: %.6f %.6f %.6f %.6f\n",
+                    t257[0], t257[1], t257[2], t257[3]);
+        }
         if (smol_verbose >= 2 && layer < 3) {
             int dpos = seq_len - 1;
             float *p = x + (size_t)dpos * dim;
@@ -461,6 +474,15 @@ void qkn_decoder_prefill(qkn_ctx_t *ctx, const float *input_embeds, int seq_len)
         smol_linear_nobias_bf16(q, x_norm, l->wq_weight_bf16, seq_len, dim, q_dim);
         smol_linear_nobias_bf16(k, x_norm, l->wk_weight_bf16, seq_len, dim, kv_dim);
         smol_linear_nobias_bf16(v, x_norm, l->wv_weight_bf16, seq_len, dim, kv_dim);
+
+        /* Debug: dump Q at last position before RoPE */
+        if (smol_verbose >= 2 && layer == 0) {
+            int lp = seq_len - 1;
+            float *qp = q + (size_t)lp * q_dim;
+            float *xnp = x_norm + (size_t)lp * dim;
+            fprintf(stderr, "[C] L0 x_norm[%d,0:4]: %.6f %.6f %.6f %.6f\n", lp, xnp[0], xnp[1], xnp[2], xnp[3]);
+            fprintf(stderr, "[C] L0 Q[%d,0:4]: %.6f %.6f %.6f %.6f\n", lp, qp[0], qp[1], qp[2], qp[3]);
+        }
 
         /* Per-head Q/K RMSNorm */
         if (l->q_norm_weight)

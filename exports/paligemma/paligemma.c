@@ -636,18 +636,20 @@ char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
 
     /* PaliGemma prompt tokens (Gemma 2 SentencePiece tokenizer).
      * Verified against HF AutoTokenizer for google/paligemma2-3b-mix-224. */
-    int caption_tokens[] = {21209, 659, 108};    /* "caption en\n" */
-    int describe_tokens[] = {15019, 108};         /* "describe\n" */
+    /* BOS + text tokens. Verified against HF PaliGemmaProcessor output.
+     * Sequence: <image>×256, BOS(2), text_tokens..., \n(109) */
+    int caption_tokens[] = {2, 21209, 659, 109};  /* BOS + "caption en\n" */
+    int describe_tokens[] = {2, 15019, 109};       /* BOS + "describe\n" */
 
     int n_prompt_tokens;
     int *prompt_tokens;
 
     if (!prompt || !prompt[0] || strstr(prompt, "caption")) {
         prompt_tokens = caption_tokens;
-        n_prompt_tokens = 3;
+        n_prompt_tokens = 4;
     } else if (strstr(prompt, "describe")) {
         prompt_tokens = describe_tokens;
-        n_prompt_tokens = 2;
+        n_prompt_tokens = 3;
     } else {
         /* Try tokenizer for custom prompts, fall back to caption */
         prompt_tokens = NULL;
@@ -656,7 +658,7 @@ char *paligemma_generate_text(paligemma_ctx_t *ctx, const char *image_path,
             prompt_tokens = hf_tokenizer_encode(ctx->_hf_tok, prompt, &n_prompt_tokens);
         if (!prompt_tokens || n_prompt_tokens == 0) {
             prompt_tokens = caption_tokens;
-            n_prompt_tokens = 3;
+            n_prompt_tokens = 4;
         }
     }
 
