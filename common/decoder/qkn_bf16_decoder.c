@@ -499,6 +499,19 @@ void qkn_bf16_decoder_prefill(qkn_bf16_ctx_t *ctx,
         bf16_linear_nobias(k, x_norm, l->wk_weight_bf16, seq_len, dim, kv_dim);
         bf16_linear_nobias(v, x_norm, l->wv_weight_bf16, seq_len, dim, kv_dim);
 
+        /* Debug: dump intermediates for layer 0 */
+        if (smol_verbose >= 2 && layer == 0) {
+            int lp = seq_len - 1;
+            uint16_t *xn_last = x_norm + (size_t)lp * dim;
+            uint16_t *q_last = q + (size_t)lp * q_dim;
+            fprintf(stderr, "[BF16-L0] x_norm[-1,0:4]: %.4f %.4f %.4f %.4f\n",
+                    bf16_to_f32(xn_last[0]), bf16_to_f32(xn_last[1]),
+                    bf16_to_f32(xn_last[2]), bf16_to_f32(xn_last[3]));
+            fprintf(stderr, "[BF16-L0] Q[-1,0:4] (pre-rope): %.4f %.4f %.4f %.4f\n",
+                    bf16_to_f32(q_last[0]), bf16_to_f32(q_last[1]),
+                    bf16_to_f32(q_last[2]), bf16_to_f32(q_last[3]));
+        }
+
         /* Per-head Q/K RMSNorm */
         if (l->q_norm_weight)
             bf16_rms_norm_per_head(q, l->q_norm_weight, seq_len, n_heads, head_dim, eps);

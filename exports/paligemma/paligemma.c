@@ -213,13 +213,13 @@ paligemma_ctx_t *paligemma_load(const char *model_dir) {
         ctx->dec_config.dec_rope_theta = 1e6f;
         ctx->dec_config.dec_rope_local_theta = 10000.0f;
         ctx->dec_config.sliding_window = 4096;
-        ctx->dec_config.sliding_window_pattern = 6;
+        ctx->dec_config.sliding_window_pattern = 2; /* alternating sliding/full */
         ctx->dec_config.attn_logit_softcap = 50.0f;
         ctx->dec_config.final_logit_softcap = 30.0f;
 
+        /* PaliGemma 2: alternating sliding/full (odd=sliding, even=full) */
         for (int i = 0; i < ctx->config.dec_layers; i++)
-            ctx->dec_ctx.decoder.layers[i].is_sliding =
-                (((i + 1) % 6) != 0) ? 1 : 0;
+            ctx->dec_ctx.decoder.layers[i].is_sliding = (i % 2 == 0) ? 1 : 0;
     } else {
         /* Gemma 1: no SWA, no softcap */
         ctx->dec_config.dec_rope_theta = ctx->config.dec_rope_theta;
