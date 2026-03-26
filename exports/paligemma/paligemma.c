@@ -571,11 +571,30 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
     float *tmp_embed = (float *)malloc(hidden * sizeof(float));
     if (!tmp_embed) return 0;
 
+    /* Track generated tokens for repetition detection */
+    int *gen_history = (int *)calloc(max_tokens + 1, sizeof(int));
     int n_generated = 0;
+
     for (int i = 0; i < max_tokens; i++) {
         if (token == ctx->eos_token || token < 0 || token >= cfg->vocab_size)
             break;
 
+        /* Simple 3-gram repetition check: if the same 3-token sequence
+         * appeared before, stop generation (prevents degenerate loops) */
+        if (gen_history && n_generated >= 3) {
+            int t0 = gen_history[n_generated - 2];
+            int t1 = gen_history[n_generated - 1];
+            int t2 = token;
+            for (int j = 0; j + 2 < n_generated - 1; j++) {
+                if (gen_history[j] == t0 && gen_history[j+1] == t1 && gen_history[j+2] == t2) {
+                    /* Repeated 3-gram — truncate back to first occurrence */
+                    n_generated = j + 3;
+                    goto done;
+                }
+            }
+        }
+
+        if (gen_history) gen_history[n_generated] = token;
         n_generated++;
 
         if (ctx->token_cb)
@@ -585,8 +604,10 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
         /* decoder normalizer applies sqrt(hidden) */
         token = qkn_decoder_forward(&ctx->dec_ctx, tmp_embed);
     }
+done:
 
     free(tmp_embed);
+    free(gen_history);
 
     double t_end = time_ms();
 
