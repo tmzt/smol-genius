@@ -60,6 +60,33 @@ __attribute__((visibility("default")))
 float *smol_mel_spectrogram(const float *samples, int n_samples, int *out_frames);
 
 /* ========================================================================
+ * WAV Writing
+ * ======================================================================== */
+
+/* Write float32 samples as a 16-bit PCM WAV file.
+ * samples: mono float32 in [-1,1]
+ * sample_rate: output sample rate (e.g. 24000 for TTS)
+ * path: output file path, or "-" for stdout
+ * Returns 0 on success, -1 on error. */
+__attribute__((visibility("default")))
+int smol_write_wav(const char *path, const float *samples, int n_samples, int sample_rate);
+
+/* ========================================================================
+ * Inverse STFT
+ * ======================================================================== */
+
+/* Reconstruct time-domain audio from magnitude and phase spectrograms.
+ * magnitude: [n_freq, n_frames]
+ * phase:     [n_freq, n_frames]
+ * n_freq = n_fft/2 + 1
+ * out_audio: output buffer (must hold at least (n_frames - 1) * hop_size + n_fft samples)
+ * Returns number of output samples. */
+__attribute__((visibility("default")))
+int smol_istft(float *out_audio,
+               const float *magnitude, const float *phase,
+               int n_freq, int n_frames, int n_fft, int hop_size);
+
+/* ========================================================================
  * Live Audio Streaming
  * ======================================================================== */
 

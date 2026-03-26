@@ -10,6 +10,9 @@ LTO_SRCS += common/kernels/rmsnorm.c
 LTO_SRCS += common/kernels/activation.c
 LTO_SRCS += common/kernels/attention.c
 LTO_SRCS += common/kernels/rope.c
+LTO_SRCS += common/kernels/conv1d.c
+LTO_SRCS += common/kernels/lstm.c
+LTO_SRCS += common/kernels/instancenorm.c
 
 # Generic fallback (always compiled)
 LTO_SRCS += common/kernels/bf16_matvec_generic.c

@@ -140,6 +140,25 @@ void smol_geglu_multiply(float *out, const float *gate_up, int seq_len, int inte
     }
 }
 
+/* ========================================================================
+ * Snake Activation: x + (1/alpha) * sin^2(alpha * x)
+ *
+ * x:     [channels, length] — modified in place
+ * alpha: [channels] — per-channel learnable parameter
+ * ======================================================================== */
+
+void smol_snake(float *x, const float *alpha, int channels, int length) {
+    for (int c = 0; c < channels; c++) {
+        float a = alpha[c];
+        float inv_a = (a != 0.0f) ? (1.0f / a) : 0.0f;
+        float *row = x + c * length;
+        for (int i = 0; i < length; i++) {
+            float s = sinf(a * row[i]);
+            row[i] += inv_a * s * s;
+        }
+    }
+}
+
 void smol_softmax(float *x, int rows, int cols) {
     for (int r = 0; r < rows; r++) {
         float *row = x + r * cols;

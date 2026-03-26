@@ -605,3 +605,140 @@ void smol_live_audio_free(smol_live_audio_t *la) {
     free(la->samples);
     free(la);
 }
+
+/* ========================================================================
+ * WAV Writing
+ * ======================================================================== */
+
+int smol_write_wav(const char *path, const float *samples, int n_samples, int sample_rate) {
+    FILE *f;
+    if (path && strcmp(path, "-") != 0) {
+        f = fopen(path, "wb");
+        if (!f) {
+            fprintf(stderr, "smol_write_wav: cannot open %s\n", path);
+            return -1;
+        }
+    } else {
+        f = stdout;
+    }
+
+    int16_t *pcm = (int16_t *)malloc(n_samples * sizeof(int16_t));
+    if (!pcm) { if (f != stdout) fclose(f); return -1; }
+
+    for (int i = 0; i < n_samples; i++) {
+        float s = samples[i];
+        if (s > 1.0f) s = 1.0f;
+        if (s < -1.0f) s = -1.0f;
+        pcm[i] = (int16_t)(s * 32767.0f);
+    }
+
+    uint32_t data_size = n_samples * sizeof(int16_t);
+    uint32_t file_size = 36 + data_size;
+
+    /* RIFF header */
+    fwrite("RIFF", 1, 4, f);
+    fwrite(&file_size, 4, 1, f);
+    fwrite("WAVE", 1, 4, f);
+
+    /* fmt chunk */
+    fwrite("fmt ", 1, 4, f);
+    uint32_t fmt_size = 16;
+    uint16_t audio_format = 1; /* PCM */
+    uint16_t num_channels = 1;
+    uint32_t sr = sample_rate;
+    uint32_t byte_rate = sample_rate * 2;
+    uint16_t block_align = 2;
+    uint16_t bits_per_sample = 16;
+    fwrite(&fmt_size, 4, 1, f);
+    fwrite(&audio_format, 2, 1, f);
+    fwrite(&num_channels, 2, 1, f);
+    fwrite(&sr, 4, 1, f);
+    fwrite(&byte_rate, 4, 1, f);
+    fwrite(&block_align, 2, 1, f);
+    fwrite(&bits_per_sample, 2, 1, f);
+
+    /* data chunk */
+    fwrite("data", 1, 4, f);
+    fwrite(&data_size, 4, 1, f);
+    fwrite(pcm, sizeof(int16_t), n_samples, f);
+
+    free(pcm);
+    if (f != stdout) fclose(f);
+    return 0;
+}
+
+/* ========================================================================
+ * Inverse Short-Time Fourier Transform (iSTFT)
+ *
+ * Reconstructs time-domain audio from magnitude and phase spectrograms
+ * using overlap-add with a Hann window.
+ *
+ * magnitude: [n_freq, n_frames], phase: [n_freq, n_frames]
+ * n_freq = n_fft/2 + 1
+ * Returns number of output samples written to out_audio.
+ * ======================================================================== */
+
+int smol_istft(float *out_audio,
+               const float *magnitude, const float *phase,
+               int n_freq, int n_frames, int n_fft, int hop_size) {
+    int out_len = (n_frames - 1) * hop_size + n_fft;
+
+    /* Zero output for overlap-add */
+    memset(out_audio, 0, out_len * sizeof(float));
+
+    /* Window normalization buffer */
+    float *window_sum = (float *)calloc(out_len, sizeof(float));
+    if (!window_sum) return 0;
+
+    /* Precompute Hann window */
+    float *hann = (float *)malloc(n_fft * sizeof(float));
+    for (int i = 0; i < n_fft; i++) {
+        hann[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / n_fft));
+    }
+
+    /* Per-frame: reconstruct complex spectrum, inverse DFT, window, overlap-add */
+    float *frame = (float *)malloc(n_fft * sizeof(float));
+
+    for (int t = 0; t < n_frames; t++) {
+        /* Inverse DFT (real output from conjugate-symmetric spectrum) */
+        for (int n = 0; n < n_fft; n++) {
+            float sum = 0.0f;
+            for (int k = 0; k < n_freq; k++) {
+                float mag = magnitude[k * n_frames + t];
+                float phi = phase[k * n_frames + t];
+                float angle = 2.0f * M_PI * k * n / n_fft;
+                /* Re(X[k] * exp(j*2*pi*k*n/N)) = mag*cos(phi + angle) */
+                sum += mag * cosf(phi + angle);
+            }
+            /* Account for conjugate-symmetric bins (k = n_fft-1 down to n_freq) */
+            for (int k = 1; k < n_freq - 1; k++) {
+                float mag = magnitude[k * n_frames + t];
+                float phi = phase[k * n_frames + t];
+                int k_mirror = n_fft - k;
+                float angle = 2.0f * M_PI * k_mirror * n / n_fft;
+                sum += mag * cosf(-phi + angle);
+            }
+            frame[n] = sum / n_fft;
+        }
+
+        /* Apply window and overlap-add */
+        int offset = t * hop_size;
+        for (int n = 0; n < n_fft; n++) {
+            out_audio[offset + n] += frame[n] * hann[n];
+            window_sum[offset + n] += hann[n] * hann[n];
+        }
+    }
+
+    /* Normalize by window sum (avoid divide-by-zero) */
+    for (int i = 0; i < out_len; i++) {
+        if (window_sum[i] > 1e-8f) {
+            out_audio[i] /= window_sum[i];
+        }
+    }
+
+    free(window_sum);
+    free(hann);
+    free(frame);
+
+    return out_len;
+}

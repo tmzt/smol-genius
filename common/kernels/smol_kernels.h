@@ -72,6 +72,25 @@ void smol_conv2d(float *out, const float *in, const float *weight, const float *
                  int kh, int kw, int stride, int padding);
 
 /* ========================================================================
+ * 1D Convolution
+ * ======================================================================== */
+
+/* Conv1D: in[c_in, length] @ weight[c_out, c_in/groups, kernel_size] -> out[c_out, out_length]
+ * out_length = (length + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1 */
+__attribute__((visibility("default")))
+void smol_conv1d(float *out, const float *in, const float *weight, const float *bias,
+                 int c_in, int c_out, int length,
+                 int kernel_size, int stride, int padding, int dilation, int groups);
+
+/* Transposed Conv1D: in[c_in, length] -> out[c_out, out_length]
+ * weight: [c_in, c_out, kernel_size]
+ * out_length = (length - 1) * stride - 2*padding + kernel_size + output_padding */
+__attribute__((visibility("default")))
+void smol_conv_transpose1d(float *out, const float *in, const float *weight, const float *bias,
+                            int c_in, int c_out, int length,
+                            int kernel_size, int stride, int padding, int output_padding);
+
+/* ========================================================================
  * Normalization
  * ======================================================================== */
 
@@ -88,6 +107,22 @@ void smol_rms_norm_per_head(float *x, const float *weight,
                              int seq_len, int n_heads, int head_dim, float eps);
 
 /* ========================================================================
+ * Instance Normalization / AdaIN
+ * ======================================================================== */
+
+/* Instance norm: normalize each channel across the sequence dimension.
+ * x: [channels, length] */
+__attribute__((visibility("default")))
+void smol_instance_norm(float *out, const float *x, int channels, int length, float eps);
+
+/* Adaptive Instance Normalization: InstanceNorm + style-conditioned affine.
+ * out[c,i] = style_std[c] * IN(x)[c,i] + style_mean[c] */
+__attribute__((visibility("default")))
+void smol_adain(float *out, const float *x,
+                const float *style_mean, const float *style_std,
+                int channels, int length, float eps);
+
+/* ========================================================================
  * Activation Functions
  * ======================================================================== */
 
@@ -101,6 +136,37 @@ __attribute__((visibility("default")))
 void smol_swiglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate);
 __attribute__((visibility("default")))
 void smol_geglu_multiply(float *out, const float *gate_up, int seq_len, int intermediate);
+
+/* Snake activation: x += (1/alpha) * sin^2(alpha * x), per-channel alpha.
+ * x: [channels, length], alpha: [channels] */
+__attribute__((visibility("default")))
+void smol_snake(float *x, const float *alpha, int channels, int length);
+
+/* ========================================================================
+ * LSTM / Bidirectional LSTM
+ * ======================================================================== */
+
+/* LSTM forward (single direction).
+ * Input: [seq_len, input_dim], Output: [seq_len, hidden_dim]
+ * W_ih: [4*hidden, input_dim], W_hh: [4*hidden, hidden_dim]
+ * b_ih, b_hh: [4*hidden]. h0, c0: [hidden_dim] or NULL for zeros. */
+__attribute__((visibility("default")))
+void smol_lstm_forward(float *out, float *h_out, float *c_out,
+                       const float *input, const float *h0, const float *c0,
+                       const float *W_ih, const float *W_hh,
+                       const float *b_ih, const float *b_hh,
+                       int seq_len, int input_dim, int hidden_dim);
+
+/* Bidirectional LSTM: runs forward + backward, concatenates.
+ * Output: [seq_len, 2 * hidden_dim] */
+__attribute__((visibility("default")))
+void smol_bilstm_forward(float *out,
+                          const float *input,
+                          const float *W_ih_fwd, const float *W_hh_fwd,
+                          const float *b_ih_fwd, const float *b_hh_fwd,
+                          const float *W_ih_bwd, const float *W_hh_bwd,
+                          const float *b_ih_bwd, const float *b_hh_bwd,
+                          int seq_len, int input_dim, int hidden_dim);
 
 /* ========================================================================
  * Attention Operations

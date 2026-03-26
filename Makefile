@@ -119,6 +119,8 @@ help:
 	@echo "  make lib MODEL=nomic        - Include Nomic embedding export"
 	@echo "  make lib MODEL=qwen_asr     - Include Qwen ASR encoder export (implies audio)"
 	@echo "  make lib MODEL=smolvlm      - Include SmolVLM vision-language export (implies vision)"
+	@echo "  make lib MODEL=kittentts    - Include KittenTTS text-to-speech export (implies audio)"
+	@echo "                                 Add ESPEAK=1 for espeak-ng phonemization"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make test                  - Run all test suites"

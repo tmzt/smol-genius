@@ -1,0 +1,19 @@
+# exports/kittentts/build.mk — KittenTTS text-to-speech export
+
+ENABLE_AUDIO = 1
+
+LTO_SRCS += exports/kittentts/kittentts.c
+LTO_SRCS += exports/kittentts/plbert.c
+LTO_SRCS += exports/kittentts/text_encoder.c
+LTO_SRCS += exports/kittentts/prosody.c
+LTO_SRCS += exports/kittentts/acoustic_decoder.c
+LTO_SRCS += exports/kittentts/vocoder.c
+LTO_SRCS += exports/kittentts/phonemizer.c
+
+CFLAGS += -DENABLE_KITTENTTS -Iexports/kittentts
+
+# Optional espeak-ng for phonemization (build with ESPEAK=1 to enable)
+ifdef ESPEAK
+  CFLAGS += -DENABLE_ESPEAK
+  LDFLAGS += -lespeak-ng
+endif
