@@ -18,38 +18,50 @@
 extern int smol_verbose;
 
 /* ========================================================================
- * Bilinear Resize
+ * Bicubic Resize (matches PIL.Image.BICUBIC / HF SiglipImageProcessor)
  * ======================================================================== */
 
-static float *bilinear_resize(const unsigned char *src, int src_w, int src_h,
-                               int dst_w, int dst_h) {
-    /* Output: [dst_h, dst_w, 3] float32 in [0, 255] range */
+static inline float cubic_weight(float x) {
+    /* Keys cubic interpolation (a = -0.5, same as PIL) */
+    float ax = x < 0 ? -x : x;
+    if (ax <= 1.0f) return (1.5f * ax - 2.5f) * ax * ax + 1.0f;
+    if (ax < 2.0f) return ((-0.5f * ax + 2.5f) * ax - 4.0f) * ax + 2.0f;
+    return 0.0f;
+}
+
+static float *bicubic_resize(const unsigned char *src, int src_w, int src_h,
+                              int dst_w, int dst_h) {
     float *dst = (float *)malloc((size_t)dst_h * dst_w * 3 * sizeof(float));
     if (!dst) return NULL;
 
     for (int y = 0; y < dst_h; y++) {
         float src_y = (float)y * (src_h - 1) / (dst_h > 1 ? dst_h - 1 : 1);
-        int y0 = (int)src_y;
-        int y1 = y0 + 1;
-        if (y1 >= src_h) y1 = src_h - 1;
-        float fy = src_y - y0;
+        int iy = (int)src_y;
+        float fy = src_y - iy;
 
         for (int x = 0; x < dst_w; x++) {
             float src_x = (float)x * (src_w - 1) / (dst_w > 1 ? dst_w - 1 : 1);
-            int x0 = (int)src_x;
-            int x1 = x0 + 1;
-            if (x1 >= src_w) x1 = src_w - 1;
-            float fx = src_x - x0;
+            int ix = (int)src_x;
+            float fx = src_x - ix;
 
             for (int c = 0; c < 3; c++) {
-                float v00 = src[(y0 * src_w + x0) * 3 + c];
-                float v01 = src[(y0 * src_w + x1) * 3 + c];
-                float v10 = src[(y1 * src_w + x0) * 3 + c];
-                float v11 = src[(y1 * src_w + x1) * 3 + c];
-                float val = v00 * (1 - fy) * (1 - fx)
-                          + v10 * fy * (1 - fx)
-                          + v01 * (1 - fy) * fx
-                          + v11 * fy * fx;
+                float val = 0.0f;
+                for (int j = -1; j <= 2; j++) {
+                    float wy = cubic_weight(fy - j);
+                    int sy = iy + j;
+                    if (sy < 0) sy = 0;
+                    if (sy >= src_h) sy = src_h - 1;
+                    for (int i = -1; i <= 2; i++) {
+                        float wx = cubic_weight(fx - i);
+                        int sx = ix + i;
+                        if (sx < 0) sx = 0;
+                        if (sx >= src_w) sx = src_w - 1;
+                        val += wy * wx * (float)src[(sy * src_w + sx) * 3 + c];
+                    }
+                }
+                /* Clamp to [0, 255] */
+                if (val < 0.0f) val = 0.0f;
+                if (val > 255.0f) val = 255.0f;
                 dst[(y * dst_w + x) * 3 + c] = val;
             }
         }
@@ -74,8 +86,8 @@ float *smol_load_image(const char *path, int target_size, int *out_w, int *out_h
                 w, h, channels, target_size, target_size);
     }
 
-    /* Bilinear resize to target_size x target_size */
-    float *resized = bilinear_resize(pixels, w, h, target_size, target_size);
+    /* Bicubic resize to target_size x target_size (matches HF SiglipImageProcessor) */
+    float *resized = bicubic_resize(pixels, w, h, target_size, target_size);
     stbi_image_free(pixels);
     if (!resized) return NULL;
 
