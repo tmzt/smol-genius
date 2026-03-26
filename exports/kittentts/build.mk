@@ -11,9 +11,3 @@ LTO_SRCS += exports/kittentts/vocoder.c
 LTO_SRCS += exports/kittentts/phonemizer.c
 
 CFLAGS += -DENABLE_KITTENTTS -Iexports/kittentts
-
-# Optional espeak-ng for phonemization (build with ESPEAK=1 to enable)
-ifdef ESPEAK
-  CFLAGS += -DENABLE_ESPEAK
-  LDFLAGS += -lespeak-ng
-endif

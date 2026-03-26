@@ -1,72 +1,44 @@
 /*
- * phonemizer.c - espeak-ng phonemization + phoneme-to-token ID mapping
+ * phonemizer.c - Self-contained English grapheme-to-phoneme + token mapping
  *
- * Uses espeak-ng's C API to convert text to IPA phonemes, then maps
- * each IPA character to a token ID from the KittenTTS vocabulary.
+ * Uses an embedded 18K-word G2P dictionary (from CMU dict) compiled into
+ * g2p_table.h. No runtime dependencies — no espeak, no data files.
  *
- * The vocabulary has 178 tokens:
- *   0 = pad/$, 1-16 = punctuation, 17-68 = ASCII, 69-177 = IPA symbols
+ * For words not in the dictionary, falls back to simple letter-to-sound rules.
  *
  * Token sequence format: [0, <phoneme_ids...>, 10, 0]
  *   Start marker: 0 (pad)
- *   End marker: 10 (ellipsis '…' in vocab)
+ *   End marker: 10
  *   Trailing pad: 0
  */
 
 #include "phonemizer.h"
+#include "g2p_table.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef ENABLE_ESPEAK
-#include <espeak-ng/speak_lib.h>
-#endif
-
-#ifdef ENABLE_ESPEAK
-static int espeak_initialized = 0;
-#endif
+#include <ctype.h>
 
 int ktts_phonemizer_init(void) {
-#ifdef ENABLE_ESPEAK
-    if (espeak_initialized) return 0;
-
-    int sr = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, NULL, 0);
-    if (sr == -1) {
-        fprintf(stderr, "kittentts: espeak_Initialize failed\n");
-        return -1;
-    }
-
-    /* Set voice to English (US) */
-    espeak_SetVoiceByName("en-us");
-    espeak_initialized = 1;
+    /* No initialization needed — dictionary is compiled in */
     return 0;
-#else
-    fprintf(stderr, "kittentts: not compiled with ENABLE_KITTENTTS\n");
-    return -1;
-#endif
 }
 
 void ktts_phonemizer_cleanup(void) {
-#ifdef ENABLE_ESPEAK
-    if (espeak_initialized) {
-        espeak_Terminate();
-        espeak_initialized = 0;
-    }
-#endif
+    /* Nothing to clean up */
 }
 
 /* ========================================================================
  * Phoneme Vocabulary Loading
  *
  * Expects a simple JSON file: {"$": 0, ";": 1, ...}
- * We parse it minimally (no full JSON parser needed).
+ * Parses single-byte keys only (sufficient for ASCII + Latin-1 first bytes).
+ * Multi-byte IPA characters are handled by the G2P table directly.
  * ======================================================================== */
 
 int ktts_load_phoneme_vocab(const char *json_path, int *phoneme_map) {
-    /* Initialize map to -1 (unknown) */
-    for (int i = 0; i < 256; i++) {
+    for (int i = 0; i < 256; i++)
         phoneme_map[i] = -1;
-    }
 
     FILE *f = fopen(json_path, "r");
     if (!f) {
@@ -74,7 +46,6 @@ int ktts_load_phoneme_vocab(const char *json_path, int *phoneme_map) {
         return -1;
     }
 
-    /* Read entire file */
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -84,39 +55,30 @@ int ktts_load_phoneme_vocab(const char *json_path, int *phoneme_map) {
     buf[size] = '\0';
     fclose(f);
 
-    /* Simple parser: find "X": N pairs */
     const char *p = buf;
     int count = 0;
     while (*p) {
-        /* Find opening quote */
         const char *q1 = strchr(p, '"');
         if (!q1) break;
         q1++;
 
-        /* Find closing quote — handle escape sequences */
         const char *q2 = q1;
         while (*q2 && *q2 != '"') {
-            if (*q2 == '\\') q2++; /* skip escaped char */
+            if (*q2 == '\\') q2++;
             q2++;
         }
         if (!*q2) break;
 
-        /* Extract the key character(s) */
         int key_len = (int)(q2 - q1);
         unsigned char key_char = 0;
-
         if (key_len == 1) {
             key_char = (unsigned char)q1[0];
         } else if (key_len == 2 && q1[0] == '\\') {
             key_char = (unsigned char)q1[1];
         } else if (key_len >= 2) {
-            /* Multi-byte UTF-8 IPA characters — use first byte as key.
-             * For full Unicode support, this would need a proper map.
-             * For now, we handle the common single-byte ASCII + Latin-1 range. */
             key_char = (unsigned char)q1[0];
         }
 
-        /* Find colon and number */
         p = q2 + 1;
         const char *colon = strchr(p, ':');
         if (!colon) break;
@@ -134,90 +96,92 @@ int ktts_load_phoneme_vocab(const char *json_path, int *phoneme_map) {
 }
 
 /* ========================================================================
- * Phonemization
+ * Simple letter-to-sound fallback for unknown words
+ *
+ * Very basic English pronunciation rules. Not accurate, but ensures
+ * every word produces *some* phoneme sequence rather than silence.
  * ======================================================================== */
 
-/* Fallback: map ASCII characters directly to token IDs when espeak unavailable */
-static int phonemize_ascii_fallback(const char *text, const int *phoneme_map,
-                                     int *out_ids, int max_ids) {
+static int fallback_letter_to_sound(const char *word, int word_len,
+                                      const int *phoneme_map,
+                                      int *out_ids, int max_ids) {
     int n = 0;
-    if (n >= max_ids) return -1;
+    /* Simple: map each letter to its most common single phoneme.
+     * phoneme_map has a-z at positions 97-122 mapped to token IDs 132-157.
+     * These correspond to letter names, not sounds, but it's a fallback. */
+    for (int i = 0; i < word_len && n < max_ids; i++) {
+        unsigned char c = (unsigned char)word[i];
+        if (c >= 'a' && c <= 'z') {
+            int id = phoneme_map[c];
+            if (id >= 0) out_ids[n++] = id;
+        }
+    }
+    return n;
+}
+
+/* ========================================================================
+ * Phonemization: text -> token IDs
+ * ======================================================================== */
+
+int ktts_phonemize(const char *text, const int *phoneme_map,
+                   int *out_ids, int max_ids) {
+    int n = 0;
+    if (max_ids < 4) return -1;
+
     out_ids[n++] = 0;  /* start pad */
 
-    const unsigned char *p = (const unsigned char *)text;
+    const char *p = text;
     while (*p && n < max_ids - 2) {
-        unsigned char c = *p;
-        /* Map space */
-        if (c == ' ') {
-            int id = phoneme_map[' '];
-            if (id >= 0) out_ids[n++] = id;
+        /* Skip whitespace, emit space token */
+        if (isspace((unsigned char)*p)) {
+            int space_id = phoneme_map[' '];
+            if (space_id >= 0 && n > 1) /* don't lead with space */
+                out_ids[n++] = space_id;
             p++;
             continue;
         }
-        /* Map lowercase letters (phoneme vocab has a-z at 132-157) */
-        if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a'; /* lowercase */
-        int id = phoneme_map[c];
-        if (id >= 0) {
-            out_ids[n++] = id;
+
+        /* Handle punctuation */
+        if (ispunct((unsigned char)*p)) {
+            int id = phoneme_map[(unsigned char)*p];
+            if (id >= 0 && n < max_ids - 2)
+                out_ids[n++] = id;
+            p++;
+            continue;
         }
-        p++;
+
+        /* Extract word (letters only) */
+        const char *word_start = p;
+        while (*p && isalpha((unsigned char)*p)) p++;
+        int word_len = (int)(p - word_start);
+        if (word_len == 0) { p++; continue; }
+
+        /* Lowercase the word into a stack buffer */
+        char lower[256];
+        int llen = word_len < 255 ? word_len : 255;
+        for (int i = 0; i < llen; i++)
+            lower[i] = tolower((unsigned char)word_start[i]);
+        lower[llen] = '\0';
+
+        /* Look up in G2P dictionary */
+        int word_ids[128];
+        int nph = g2p_lookup(lower, llen, word_ids, 128);
+
+        if (nph > 0) {
+            /* Found in dictionary */
+            for (int i = 0; i < nph && n < max_ids - 2; i++)
+                out_ids[n++] = word_ids[i];
+        } else {
+            /* Fallback: letter-to-sound */
+            int flen = fallback_letter_to_sound(lower, llen, phoneme_map,
+                                                  word_ids, 128);
+            for (int i = 0; i < flen && n < max_ids - 2; i++)
+                out_ids[n++] = word_ids[i];
+        }
     }
 
     if (n >= max_ids - 1) n = max_ids - 2;
     out_ids[n++] = 10; /* end marker */
     out_ids[n++] = 0;  /* trailing pad */
     return n;
-}
-
-int ktts_phonemize(const char *text, const int *phoneme_map,
-                   int *out_ids, int max_ids) {
-#ifdef ENABLE_ESPEAK
-    if (!espeak_initialized) {
-        fprintf(stderr, "kittentts: espeak not initialized\n");
-        return -1;
-    }
-
-    /* Convert text to phonemes using espeak-ng */
-    const char *input = text;
-    int textmode = espeakCHARS_AUTO;
-    int phonememode = espeakPHONEMES_IPA;  /* IPA output with stress marks */
-
-    /* espeak_TextToPhonemes returns a pointer to a static buffer */
-    const char *phonemes = espeak_TextToPhonemes(
-        (const void **)&input, textmode, phonememode);
-
-    if (!phonemes) {
-        fprintf(stderr, "kittentts: espeak_TextToPhonemes failed\n");
-        return -1;
-    }
-
-    /* Build token sequence: [0, <phoneme_ids>, 10, 0] */
-    int n = 0;
-    if (n >= max_ids) return -1;
-    out_ids[n++] = 0;  /* start pad */
-
-    /* Map each character of the IPA string to a token ID */
-    const unsigned char *ph = (const unsigned char *)phonemes;
-    while (*ph && n < max_ids - 2) {
-        int id = phoneme_map[*ph];
-        if (id >= 0) {
-            out_ids[n++] = id;
-        }
-        /* Skip unknown characters silently */
-        ph++;
-    }
-
-    if (n >= max_ids - 1) {
-        /* Truncated — still add end markers */
-        n = max_ids - 2;
-    }
-
-    out_ids[n++] = 10; /* end marker */
-    out_ids[n++] = 0;  /* trailing pad */
-
-    return n;
-#else
-    /* No espeak: use ASCII fallback */
-    return phonemize_ascii_fallback(text, phoneme_map, out_ids, max_ids);
-#endif
 }
