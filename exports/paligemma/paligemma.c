@@ -206,7 +206,7 @@ paligemma_ctx_t *paligemma_load(const char *model_dir) {
     ctx->dec_config.activation = QKN_ACT_GEGLU;
     ctx->dec_config.rope_type = QKN_ROPE_INTERLEAVED;
 
-    ctx->dec_config.embed_normalizer = 0.0f; /* scaling done in caller */
+    ctx->dec_config.embed_normalizer = sqrtf((float)ctx->config.dec_hidden); /* scaling done in caller */
 
     if (ctx->config.is_gemma2) {
         /* Gemma 2: SWA, dual RoPE theta, softcapped attention */
@@ -515,23 +515,24 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
     const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
     int pos = 0;
 
-    /* Vision embeddings: scale by sqrt(hidden) to match text embedding magnitude.
-     * NOTE: HF does NOT scale vision — it relies on the Gemma normalizer step.
-     * Our simpler approach scales vision explicitly. This produces garbled but
-     * non-EOS output. TODO: fix Gemma 2 decoder normalizer path properly. */
-    for (int i = 0; i < n_vis_tokens * hidden; i++)
-        vis_embeds[i] *= embed_scale;
+    /* Vision embeddings: divide by sqrt(hidden).
+     * The decoder normalizer multiplies ALL embeddings by sqrt(hidden),
+     * so vision ends up at original magnitude (div then mul cancels).
+     * Text ends up at raw * sqrt(hidden) which is the Gemma convention. */
+    {
+        float inv_scale = 1.0f / embed_scale;
+        for (int i = 0; i < n_vis_tokens * hidden; i++)
+            vis_embeds[i] *= inv_scale;
+    }
     memcpy(embeddings + (size_t)pos * hidden, vis_embeds,
            (size_t)n_vis_tokens * hidden * sizeof(float));
     free(vis_embeds);
     pos += n_vis_tokens;
 
-    /* Text token embeddings: scaled by sqrt(hidden) (Gemma convention) */
+    /* Text token embeddings: raw (decoder normalizer applies sqrt(hidden)) */
     for (int i = 0; i < n_prompt_tokens; i++) {
         float *dst = embeddings + (size_t)(pos + i) * hidden;
         tok_embed_bf16_to_f32(dst, tok_emb, prompt_tokens[i], hidden);
-        for (int d = 0; d < hidden; d++)
-            dst[d] *= embed_scale;
     }
 
     /* ---- Reset KV cache and run decoder ---- */
@@ -566,7 +567,7 @@ int paligemma_generate(paligemma_ctx_t *ctx, const char *image_path,
             ctx->token_cb(token, ctx->token_cb_userdata);
 
         tok_embed_bf16_to_f32(tmp_embed, tok_emb, token, hidden);
-        for (int d = 0; d < hidden; d++) tmp_embed[d] *= embed_scale;
+        /* decoder normalizer applies sqrt(hidden) */
         token = qkn_decoder_forward(&ctx->dec_ctx, tmp_embed);
     }
 
