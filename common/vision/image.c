@@ -35,12 +35,15 @@ static float *bicubic_resize(const unsigned char *src, int src_w, int src_h,
     if (!dst) return NULL;
 
     for (int y = 0; y < dst_h; y++) {
-        float src_y = (float)y * (src_h - 1) / (dst_h > 1 ? dst_h - 1 : 1);
+        /* PIL-compatible coordinate mapping: half-pixel center */
+        float src_y = ((float)y + 0.5f) * src_h / dst_h - 0.5f;
+        if (src_y < 0.0f) src_y = 0.0f;
         int iy = (int)src_y;
         float fy = src_y - iy;
 
         for (int x = 0; x < dst_w; x++) {
-            float src_x = (float)x * (src_w - 1) / (dst_w > 1 ? dst_w - 1 : 1);
+            float src_x = ((float)x + 0.5f) * src_w / dst_w - 0.5f;
+            if (src_x < 0.0f) src_x = 0.0f;
             int ix = (int)src_x;
             float fx = src_x - ix;
 
