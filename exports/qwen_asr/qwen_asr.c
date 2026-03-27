@@ -27,6 +27,35 @@
 int qwen_verbose = 0;
 int qwen_monitor = 0;
 
+/* Shared atomics slot layout (matches Rust common::shared_state) */
+#define SA_PIPELINE_STATE   0
+#define SA_ENERGY_GATE      1
+#define SA_WW_GATE          2
+#define SA_MEL_COUNT        8
+#define SA_ENCODER_COUNT    9
+#define SA_TOKEN_COUNT     10
+#define SA_AUDIO_CHUNKS    11
+#define SA_MFCC_ENERGY     12
+
+/* Increment a shared atomic counter if the array is set */
+#define SA_INC(ctx, slot) do { \
+    if ((ctx)->shared_atomics && (slot) < (ctx)->shared_atomics_len) \
+        atomic_fetch_add_explicit(&(ctx)->shared_atomics[slot], 1, memory_order_relaxed); \
+} while(0)
+
+/* Write a value to a shared atomic slot */
+#define SA_SET(ctx, slot, val) do { \
+    if ((ctx)->shared_atomics && (slot) < (ctx)->shared_atomics_len) \
+        atomic_store_explicit(&(ctx)->shared_atomics[slot], (val), memory_order_relaxed); \
+} while(0)
+
+/* Write a float as u32 bits to a shared atomic slot */
+static inline void sa_set_f32(qwen_ctx_t *ctx, int slot, float val) {
+    uint32_t bits;
+    memcpy(&bits, &val, sizeof(bits));
+    SA_SET(ctx, slot, bits);
+}
+
 /* ========================================================================
  * Token Callback
  * ======================================================================== */
@@ -561,6 +590,9 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
     float *mel = smol_mel_spectrogram(samples, n_samples, &mel_frames);
     if (!mel) return NULL;
     double mel_ms = get_time_ms() - t0;
+    SA_INC(ctx, SA_MEL_COUNT);
+    { int n = mel_frames * 128; float s = 0; for (int i = 0; i < n; i++) s += mel[i];
+      float avg = n > 0 ? s / n : 0; sa_set_f32(ctx, SA_MFCC_ENERGY, avg); }
 
     if (qwen_verbose >= 2)
         fprintf(stderr, "  Mel: %d frames (%.0f ms)\n", mel_frames, mel_ms);
@@ -573,6 +605,15 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
     free(mel);
     if (!enc_output) return NULL;
     double enc_ms = get_time_ms() - t0;
+    SA_INC(ctx, SA_ENCODER_COUNT);
+
+    { float mel_avg = 0; uint32_t b = 0;
+      if (ctx->shared_atomics && SA_MFCC_ENERGY < ctx->shared_atomics_len)
+          b = atomic_load_explicit(&ctx->shared_atomics[SA_MFCC_ENERGY], memory_order_relaxed);
+      memcpy(&mel_avg, &b, 4);
+      fprintf(stderr, "[c-asr] mel=%d frames (%.0fms), encoder=%d tokens (%.0fms), samples=%d, mel_energy=%.3f\n",
+              mel_frames, mel_ms, enc_seq_len, enc_ms, n_samples, mel_avg);
+    }
 
     if (qwen_verbose >= 2)
         fprintf(stderr, "  Encoder: %d tokens (%.0f ms)\n", enc_seq_len, enc_ms);
@@ -690,8 +731,10 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
             text[text_len] = '\0';
             n_text_tokens++;
 
-            if (ctx->token_cb)
+            if (ctx->token_cb) {
+                SA_INC(ctx, SA_TOKEN_COUNT);
                 ctx->token_cb(piece, ctx->token_cb_userdata);
+            }
         }
 
         tok_embed_bf16_to_f32(tmp_embed, tok_emb, token, dim);
@@ -1007,12 +1050,20 @@ static int stream_encode_span(qwen_ctx_t *ctx, const float *samples, int n_sampl
     int mel_frames = 0;
     float *mel = smol_mel_spectrogram(samples, n_samples, &mel_frames);
     if (!mel) return -1;
+    SA_INC(ctx, SA_MEL_COUNT);
+    { int n = mel_frames * 128; float s = 0; for (int i = 0; i < n; i++) s += mel[i];
+      float avg = n > 0 ? s / n : 0; sa_set_f32(ctx, SA_MFCC_ENERGY, avg);
+      fprintf(stderr, "[c-asr-stream] mel=%d frames, mel_energy=%.3f, samples=%d\n",
+              mel_frames, avg, n_samples); }
 
     int seq_len = 0;
     float *enc_output = qwen_asr_encoder_forward(&ctx->encoder, &ctx->enc_config,
                                                   mel, mel_frames, &seq_len);
     free(mel);
     if (!enc_output) return -1;
+    SA_INC(ctx, SA_ENCODER_COUNT);
+
+    fprintf(stderr, "[c-asr-stream] encoder=%d tokens\n", seq_len);
 
     *out_enc_output = enc_output;
     *out_seq_len = seq_len;
@@ -1744,7 +1795,7 @@ static char *stream_impl(qwen_ctx_t *ctx, const float *samples, int n_samples,
                 for (int i = emit_start; i < candidate_len; i++) {
                     int tok = stable_text_tokens[i];
                     const char *piece = smol_tokenizer_decode(ctx->tokenizer, tok);
-                    if (ctx->token_cb) ctx->token_cb(piece, ctx->token_cb_userdata);
+                    if (ctx->token_cb) { SA_INC(ctx, SA_TOKEN_COUNT); ctx->token_cb(piece, ctx->token_cb_userdata); }
 
                     size_t plen = strlen(piece);
                     if (result_len + plen + 1 > result_cap) {
@@ -1864,6 +1915,7 @@ static qwen_control_action_t take_control(qwen_ctx_t *ctx) {
 static void set_state(qwen_ctx_t *ctx, qwen_pipeline_state_t state) {
     atomic_store_explicit(&ctx->pipeline_state, (uint32_t)state,
                           memory_order_release);
+    SA_SET(ctx, SA_PIPELINE_STATE, (uint32_t)state);
 }
 
 static float ww_cosine_sim(const float *a, const float *b, int dim) {
@@ -2027,12 +2079,15 @@ void qwen_transcribe_stream_live_persistent(qwen_ctx_t *ctx, qwen_live_audio_t *
             }
         }
 gate_open:
+        fprintf(stderr, "[c-asr] gate_open: entering LISTENING state\n");
 
         set_state(ctx, QWEN_PIPELINE_LISTENING);
 
         /* Reset LiveAudio cursor so stream_impl starts from a clean base.
          * Any buffered audio from wakeword detection is stale — drop it. */
         pthread_mutex_lock(&live->mutex);
+        fprintf(stderr, "[c-asr] dropping %lld stale samples from LiveAudio\n",
+                (long long)live->n_samples);
         live->n_samples = 0;
         live->sample_offset = 0;
         pthread_mutex_unlock(&live->mutex);
@@ -2158,6 +2213,13 @@ qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx) {
     if (!ctx) return QWEN_PIPELINE_IDLE;
     return (qwen_pipeline_state_t)atomic_load_explicit(
         (_Atomic uint32_t *)&ctx->pipeline_state, memory_order_acquire);
+}
+
+void qwen_set_shared_atomics(qwen_ctx_t *ctx, _Atomic uint32_t *atomics, int len) {
+    if (!ctx) return;
+    ctx->shared_atomics = atomics;
+    ctx->shared_atomics_len = len;
+    fprintf(stderr, "[c-asr] shared_atomics set: %d slots at %p\n", len, (void*)atomics);
 }
 
 
