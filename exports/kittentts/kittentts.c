@@ -236,6 +236,11 @@ static int load_acoustic_decoder(ktts_acoustic_dec_t *m, multi_safetensors_t *ms
         snprintf(name, sizeof(name), "decoder.decode.%d.conv1x1.weight", i);
         m->dec_blocks[i].skip_w = try_load_f32(ms, name);
         m->dec_blocks[i].skip_b = NULL;
+        /* Decode block 3 has a 2x upsample pool */
+        snprintf(name, sizeof(name), "decoder.decode.%d.pool.weight", i);
+        m->dec_blocks[i].pool_w = try_load_f32(ms, name);
+        snprintf(name, sizeof(name), "decoder.decode.%d.pool.bias", i);
+        m->dec_blocks[i].pool_b = try_load_f32(ms, name);
     }
 
     if (!m->adapter_w || !m->enc_conv1_w) return -1;
@@ -280,7 +285,11 @@ static int load_vocoder(ktts_vocoder_t *m, multi_safetensors_t *ms) {
 
     m->source_linear_b = try_load_f32(ms, "vocoder.source.bias");
 
-    if (!m->up0_w || !m->conv_post_w) return -1;
+    /* Learned iSTFT basis weights */
+    m->istft_real_w = load_f32(ms, "vocoder.stft.weight_backward_real");
+    m->istft_imag_w = load_f32(ms, "vocoder.stft.weight_backward_imag");
+
+    if (!m->up0_w || !m->conv_post_w || !m->istft_real_w) return -1;
     return 0;
 }
 

@@ -203,6 +203,9 @@ typedef struct {
         float *adain_fc_b;
         float *skip_w;
         float *skip_b;
+        /* Optional 2x upsample pool (decode block 3) */
+        float *pool_w;         /* depthwise ConvTranspose [322, 1, 3] */
+        float *pool_b;         /* [322] */
     } dec_blocks[KTTS_DECODER_BLOCKS];
 } ktts_acoustic_dec_t;
 
@@ -246,6 +249,10 @@ typedef struct {
     /* Output conv */
     float *conv_post_w;         /* [22, 64, 7] */
     float *conv_post_b;         /* [22] */
+
+    /* Learned iSTFT (ConvTranspose with fixed DFT basis weights) */
+    float *istft_real_w;        /* [11, 1, 20] stride=5 */
+    float *istft_imag_w;        /* [11, 1, 20] stride=5 */
 } ktts_vocoder_t;
 
 /* ========================================================================

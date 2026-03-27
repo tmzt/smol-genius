@@ -164,52 +164,64 @@ int ktts_vocoder_forward(const ktts_vocoder_t *model,
                      model->resblocks[3].adain_fc_w, model->resblocks[3].adain_fc_b,
                      model->resblocks[3].snake_alpha, style, rb2_scratch);
 
-    /* --- Stage 3: Post convolution -> magnitude/phase -> iSTFT --- */
+    /* --- Stage 3: Post convolution -> learned iSTFT --- */
     int n_freq = KTTS_VOC_NFREQ;    /* 11 */
-    int n_fft = KTTS_VOC_NFFT;      /* 20 */
-    int hop = KTTS_VOC_HOP;         /* 5 */
 
-    /* Conv1D post: [64, len2] -> [22, len2] (mag + phase interleaved) */
+    /* Conv1D post: [64, len2] -> [22, len2] (first 11 = log-mag, next 11 = phase) */
     float *post_out = rb2_out;
     smol_conv1d(post_out, up2, model->conv_post_w, model->conv_post_b,
                 KTTS_VOC_CH_1, 2 * n_freq, len2,
                 7, 1, 3, 1, 1);
 
-    /* Split into magnitude and phase: each [11, len2] */
-    float *mag = post_out;                           /* first 11 channels */
-    float *phase = post_out + n_freq * (size_t)len2; /* next 11 channels */
+    /* Split into log-magnitude and phase: each [11, len2] */
+    float *log_mag = post_out;
+    float *phase = post_out + n_freq * (size_t)len2;
 
-    /* Apply exp to magnitude (log-magnitude -> magnitude) */
+    /* magnitude = exp(log_mag) */
+    float *mag = log_mag; /* in-place */
     for (int i = 0; i < n_freq * len2; i++) {
         mag[i] = expf(mag[i]);
     }
 
-    /* iSTFT: magnitude + phase -> waveform */
-    int n_samples = smol_istft(out_audio, mag, phase,
-                                n_freq, len2, n_fft, hop);
-
-    /* Trim trailing artifacts (last ~5000 samples per KittenTTS convention) */
-    int trim = 5000;
-    if (n_samples > trim) {
-        n_samples -= trim;
+    /* Compute real and imaginary STFT components:
+     *   real_spec[k, t] = mag[k, t] * cos(phase[k, t])
+     *   imag_spec[k, t] = mag[k, t] * sin(phase[k, t]) */
+    float *real_spec = rb2_scratch;
+    float *imag_spec = real_spec + n_freq * (size_t)len2;
+    for (int i = 0; i < n_freq * len2; i++) {
+        real_spec[i] = mag[i] * cosf(phase[i]);
+        imag_spec[i] = mag[i] * sinf(phase[i]);
     }
+
+    /* Learned iSTFT via ConvTranspose1D:
+     *   real_signal = ConvTranspose1D(real_spec, stft.weight_backward_real, s=5, k=20, p=0)
+     *   imag_signal = ConvTranspose1D(imag_spec, stft.weight_backward_imag, s=5, k=20, p=0)
+     *   waveform = real_signal - imag_signal
+     *
+     * weight shape: [11, 1, 20] — maps 11 frequency bins to 1 output channel */
+    int n_samples = (len2 - 1) * KTTS_VOC_HOP + KTTS_VOC_NFFT;
+    float *real_signal = imag_spec + n_freq * (size_t)len2;
+    float *imag_signal = real_signal + n_samples;
+
+    smol_conv_transpose1d(real_signal, real_spec, model->istft_real_w, NULL,
+                          n_freq, 1, len2,
+                          KTTS_VOC_NFFT, KTTS_VOC_HOP, 0, 0);
+    smol_conv_transpose1d(imag_signal, imag_spec, model->istft_imag_w, NULL,
+                          n_freq, 1, len2,
+                          KTTS_VOC_NFFT, KTTS_VOC_HOP, 0, 0);
+
+    /* waveform = real - imag */
+    for (int i = 0; i < n_samples; i++) {
+        out_audio[i] = real_signal[i] - imag_signal[i];
+    }
+
+    /* Trim last 15 samples (padding artifact from ConvTranspose) */
+    int trim = 15;
+    if (n_samples > trim) n_samples -= trim;
 
     /* Clean NaN values */
     for (int i = 0; i < n_samples; i++) {
-        if (out_audio[i] != out_audio[i]) { /* NaN check */
-            out_audio[i] = 0.0f;
-        }
-    }
-
-    /* Normalize volume */
-    float max_abs = 0.0f;
-    for (int i = 0; i < n_samples; i++) {
-        float a = fabsf(out_audio[i]);
-        if (a > max_abs) max_abs = a;
-    }
-    if (max_abs > 0.01f) {
-        float scale = 0.95f / max_abs;
-        smol_scale(out_audio, scale, n_samples);
+        if (out_audio[i] != out_audio[i]) out_audio[i] = 0.0f;
     }
 
     return n_samples;
