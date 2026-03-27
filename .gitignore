@@ -24,5 +24,6 @@ libpaligemma_test.dylib
 libpaligemma_test.so
 paligemma_test
 /kittentts
+/qwen_asr
 /kitten-tts-nano/
 /.kittentts_build/
