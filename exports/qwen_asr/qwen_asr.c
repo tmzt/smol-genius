@@ -2222,4 +2222,39 @@ void qwen_set_shared_atomics(qwen_ctx_t *ctx, _Atomic uint32_t *atomics, int len
     fprintf(stderr, "[c-asr] shared_atomics set: %d slots at %p\n", len, (void*)atomics);
 }
 
+/* ========================================================================
+ * Split Encoder API (for GPU-accelerated encoder)
+ * ======================================================================== */
 
+float *qwen_mel_spectrogram(const float *samples, int n_samples, int *out_mel_frames) {
+    return smol_mel_spectrogram(samples, n_samples, out_mel_frames);
+}
+
+float *qwen_encoder_conv_stem(qwen_ctx_t *ctx,
+                               const float *mel, int mel_frames,
+                               int *out_tokens, int *out_d_model) {
+    if (!ctx) return NULL;
+    int n_windows = 0;
+    int *window_starts = NULL;
+    float *tokens = qwen_asr_encoder_conv_stem(&ctx->encoder, &ctx->enc_config,
+                                                 mel, mel_frames, out_tokens,
+                                                 &window_starts, &n_windows);
+    free(window_starts); /* caller doesn't need window info — GPU handles attention */
+    *out_d_model = ctx->enc_config.enc_d_model;
+    fprintf(stderr, "[c-asr] conv_stem: %d mel frames → %d tokens (d=%d)\n",
+            mel_frames, *out_tokens, *out_d_model);
+    return tokens;
+}
+
+char *qwen_decode_with_encoder_output(qwen_ctx_t *ctx,
+                                       const float *enc_output, int enc_seq_len,
+                                       int output_dim) {
+    if (!ctx) return NULL;
+    fprintf(stderr, "[c-asr] decode_with_encoder_output: %d tokens, dim=%d\n",
+            enc_seq_len, output_dim);
+    /* Feed encoder output directly to the decoder, bypassing the C encoder.
+     * This reuses the existing decode path from qwen_transcribe_segment_internal. */
+    /* TODO: implement — needs to inject enc_output as audio embeddings
+     * into the decoder prompt, same as the normal path does after encoder_forward. */
+    return NULL;
+}
