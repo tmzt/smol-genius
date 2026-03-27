@@ -13,7 +13,6 @@ CFLAGS += -Icommon/kernels -Icommon/utils
 SRCS =
 LTO_SRCS =
 TEST_TARGETS =
-APP_TARGETS =
 
 # Platform detection
 UNAME_S := $(shell uname -s)
@@ -93,6 +92,19 @@ ifdef ENABLE_DECODER
 endif
 
 # =====================================================================
+# APP=1: auto-discover *_main.c in included exports -> binary targets
+# Convention: exports/<model>/<model>_main.c -> binary named <model>
+# =====================================================================
+
+APP_TARGETS =
+ifeq ($(APP),1)
+ifdef MODELS
+  APP_MAINS := $(foreach m,$(MODELS),$(wildcard exports/$(m)/$(m)_main.c))
+  APP_TARGETS := $(foreach s,$(APP_MAINS),$(notdir $(patsubst %_main.c,%,$(s))))
+endif
+endif
+
+# =====================================================================
 # Build rules
 # =====================================================================
 
@@ -122,8 +134,9 @@ help:
 	@echo "  make lib MODEL=smolvlm      - Include SmolVLM vision-language export (implies vision)"
 	@echo "  make lib MODEL=kittentts    - Include KittenTTS text-to-speech export (implies audio)"
 	@echo ""
-	@echo "Build standalone binary (requires MODEL):"
+	@echo "Build standalone binary (auto-detects <model>_main.c in exports):"
 	@echo "  make lib MODEL=kittentts APP=1  - Build libsmol.a + kittentts binary"
+	@echo "  make lib MODEL=kittentts,qwen_asr APP=1  - Build both binaries"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make test                  - Run all test suites"
@@ -144,6 +157,13 @@ ALL_DEPS = $(ALL_OBJS:.o=.d)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 -include $(ALL_DEPS)
+
+# APP binary rule: <name> is built from exports/<name>/<name>_main.c + libsmol.a
+define APP_RULE
+$(1): libsmol.a exports/$(1)/$(1)_main.c
+	$$(CC) $$(CFLAGS) -o $$@ exports/$(1)/$(1)_main.c -L. -lsmol $$(LDFLAGS)
+endef
+$(foreach app,$(APP_TARGETS),$(eval $(call APP_RULE,$(app))))
 
 # Test target
 test: $(TEST_TARGETS)
@@ -180,4 +200,7 @@ ifdef ENABLE_AUDIO
 endif
 ifdef ENABLE_VISION
 	@echo "VISION:    enabled"
+endif
+ifneq ($(APP_TARGETS),)
+	@echo "APP:       $(APP_TARGETS)"
 endif
