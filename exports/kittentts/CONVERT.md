@@ -91,17 +91,17 @@ Prints all ONNX tensor names, shapes, input/output specs, and op types.
 
 ## Build
 
+Library only:
 ```bash
-make clean && make lib MODEL=kittentts USE_BLAS=1
-
-clang -O3 -ffast-math -std=c11 \
-  -Icommon/kernels -Icommon/utils -Iexports/kittentts -Icommon/audio \
-  -DUSE_BLAS -DACCELERATE_NEW_LAPACK -DENABLE_KITTENTTS \
-  -o kittentts exports/kittentts/main.c \
-  -L. -lsmol -framework Accelerate -lm -lpthread
+make lib MODEL=kittentts USE_BLAS=1
 ```
 
-On Linux replace `-framework Accelerate` with `-lopenblas`.
+Library + standalone binary:
+```bash
+make lib MODEL=kittentts USE_BLAS=1 APP=1
+```
+
+On Linux replace `USE_BLAS=1` with `USE_BLAS=1` and ensure OpenBLAS is installed.
 
 ## Run
 

@@ -13,6 +13,7 @@ CFLAGS += -Icommon/kernels -Icommon/utils
 SRCS =
 LTO_SRCS =
 TEST_TARGETS =
+APP_TARGETS =
 
 # Platform detection
 UNAME_S := $(shell uname -s)
@@ -120,7 +121,9 @@ help:
 	@echo "  make lib MODEL=qwen_asr     - Include Qwen ASR encoder export (implies audio)"
 	@echo "  make lib MODEL=smolvlm      - Include SmolVLM vision-language export (implies vision)"
 	@echo "  make lib MODEL=kittentts    - Include KittenTTS text-to-speech export (implies audio)"
-	@echo "                                 Add ESPEAK=1 for espeak-ng phonemization"
+	@echo ""
+	@echo "Build standalone binary (requires MODEL):"
+	@echo "  make lib MODEL=kittentts APP=1  - Build libsmol.a + kittentts binary"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  make test                  - Run all test suites"
@@ -128,7 +131,7 @@ help:
 	@echo "  make info                  - Show build configuration"
 
 # Library target
-lib: libsmol.a
+lib: libsmol.a $(APP_TARGETS)
 
 libsmol.a: $(ALL_OBJS)
 	$(AR) rcs $@ $^
@@ -158,7 +161,7 @@ tools/compile_wakewords: tools/compile_wakewords.c libsmol.a
 	$(CC) -O2 -o $@ $< -Icommon/audio -Icommon/kernels -Icommon/utils -Iexports/qwen_asr -Icommon/decoder -L. -lsmol -framework Accelerate -lm -lpthread
 
 clean:
-	rm -f $(ALL_OBJS) $(ALL_DEPS) libsmol.a test_math tools/compile_wakewords
+	rm -f $(ALL_OBJS) $(ALL_DEPS) libsmol.a test_math tools/compile_wakewords $(APP_TARGETS)
 	find . \( -name '*.o' -o -name '*.d' \) -delete
 
 info:
