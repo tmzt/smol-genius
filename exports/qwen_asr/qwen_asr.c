@@ -2250,11 +2250,126 @@ char *qwen_decode_with_encoder_output(qwen_ctx_t *ctx,
                                        const float *enc_output, int enc_seq_len,
                                        int output_dim) {
     if (!ctx) return NULL;
-    fprintf(stderr, "[c-asr] decode_with_encoder_output: %d tokens, dim=%d\n",
-            enc_seq_len, output_dim);
-    /* Feed encoder output directly to the decoder, bypassing the C encoder.
-     * This reuses the existing decode path from qwen_transcribe_segment_internal. */
-    /* TODO: implement — needs to inject enc_output as audio embeddings
-     * into the decoder prompt, same as the normal path does after encoder_forward. */
-    return NULL;
+    int dim = ctx->dec_config.dec_hidden;
+    fprintf(stderr, "[c-asr] decode_with_encoder_output: %d tokens, enc_dim=%d, dec_dim=%d\n",
+            enc_seq_len, output_dim, dim);
+
+    if (output_dim != dim) {
+        fprintf(stderr, "[c-asr] ERROR: encoder output_dim=%d != decoder hidden=%d\n",
+                output_dim, dim);
+        return NULL;
+    }
+
+    if (prepare_prompt_tokens(ctx) != 0) return NULL;
+
+    /* Build input embeddings: prefix + encoder_output + suffix */
+    int prefix_len = PREFIX_HEAD_LEN + ctx->n_prompt_tokens + PREFIX_TAIL_LEN;
+    int suffix_len = SUFFIX_BASE_LEN + ctx->n_force_prompt_tokens;
+    int total_seq = prefix_len + enc_seq_len + suffix_len;
+    float *input_embeds = (float *)malloc((size_t)total_seq * dim * sizeof(float));
+    float *tmp_embed = (float *)malloc(dim * sizeof(float));
+    if (!input_embeds || !tmp_embed) {
+        free(input_embeds); free(tmp_embed);
+        return NULL;
+    }
+
+    const uint16_t *tok_emb = ctx->dec_ctx.decoder.tok_embeddings_bf16;
+
+    /* Prefix head */
+    int off = 0;
+    for (int i = 0; i < PREFIX_HEAD_LEN; i++) {
+        tok_embed_bf16_to_f32(input_embeds + off * dim, tok_emb,
+                              PROMPT_PREFIX_HEAD[i], dim);
+        off++;
+    }
+    for (int i = 0; i < ctx->n_prompt_tokens; i++) {
+        tok_embed_bf16_to_f32(input_embeds + off * dim, tok_emb,
+                              ctx->prompt_tokens[i], dim);
+        off++;
+    }
+    for (int i = 0; i < PREFIX_TAIL_LEN; i++) {
+        tok_embed_bf16_to_f32(input_embeds + off * dim, tok_emb,
+                              PROMPT_PREFIX_TAIL[i], dim);
+        off++;
+    }
+
+    /* Encoder output as audio embeddings */
+    memcpy(input_embeds + (size_t)prefix_len * dim,
+           enc_output, (size_t)enc_seq_len * dim * sizeof(float));
+
+    /* Suffix */
+    int suffix_off = prefix_len + enc_seq_len;
+    for (int i = 0; i < SUFFIX_BASE_LEN; i++)
+        tok_embed_bf16_to_f32(input_embeds + (suffix_off + i) * dim, tok_emb,
+                              PROMPT_SUFFIX_BASE[i], dim);
+    for (int i = 0; i < ctx->n_force_prompt_tokens; i++)
+        tok_embed_bf16_to_f32(input_embeds + (suffix_off + SUFFIX_BASE_LEN + i) * dim,
+                              tok_emb, ctx->force_prompt_tokens[i], dim);
+
+    /* Decoder prefill */
+    double t0 = get_time_ms();
+    ctx->dec_ctx.kv_cache_len = 0;
+    int prefill_len = total_seq - 1;
+    qkn_decoder_prefill(&ctx->dec_ctx, input_embeds, prefill_len);
+
+    float *last_embed = input_embeds + (size_t)prefill_len * dim;
+    int token = qkn_decoder_forward(&ctx->dec_ctx, last_embed);
+    free(input_embeds);
+    double prefill_ms = get_time_ms() - t0;
+    fprintf(stderr, "[c-asr] prefill: %d tokens (%.0f ms)\n", total_seq, prefill_ms);
+
+    /* Autoregressive decode */
+    t0 = get_time_ms();
+    int max_tokens = 2048;
+    int n_generated = 0;
+    int past_asr_text = (ctx->n_force_prompt_tokens > 0) ? 1 : 0;
+
+    size_t text_cap = 4096;
+    size_t text_len = 0;
+    char *text = (char *)malloc(text_cap);
+    text[0] = '\0';
+
+    while (n_generated < max_tokens) {
+        n_generated++;
+        if (token == QWEN_TOKEN_ENDOFTEXT || token == QWEN_TOKEN_IM_END) break;
+
+        if (token == QWEN_TOKEN_ASR_TEXT) {
+            past_asr_text = 1;
+        } else if (past_asr_text) {
+            const char *piece = smol_tokenizer_decode(ctx->tokenizer, token);
+            size_t piece_len = strlen(piece);
+            if (text_len + piece_len + 1 > text_cap) {
+                while (text_len + piece_len + 1 > text_cap) text_cap *= 2;
+                text = (char *)realloc(text, text_cap);
+            }
+            memcpy(text + text_len, piece, piece_len);
+            text_len += piece_len;
+            text[text_len] = '\0';
+
+            if (ctx->token_cb) {
+                SA_INC(ctx, SA_TOKEN_COUNT);
+                ctx->token_cb(piece, ctx->token_cb_userdata);
+            }
+        }
+
+        tok_embed_bf16_to_f32(tmp_embed, tok_emb, token, dim);
+        token = qkn_decoder_forward(&ctx->dec_ctx, tmp_embed);
+    }
+
+    double decode_ms = get_time_ms() - t0;
+    fprintf(stderr, "[c-asr] decode: %d tokens (%.0f ms, %.1f ms/tok)\n",
+            n_generated, decode_ms, n_generated > 0 ? decode_ms / n_generated : 0);
+    free(tmp_embed);
+
+    /* Trim whitespace */
+    size_t rlen = strlen(text);
+    while (rlen > 0 && isspace((unsigned char)text[rlen - 1])) text[--rlen] = '\0';
+    char *start = text;
+    while (*start && isspace((unsigned char)*start)) start++;
+    if (start != text) {
+        memmove(text, start, strlen(start) + 1);
+    }
+
+    fprintf(stderr, "[c-asr] result: \"%s\"\n", text);
+    return text;
 }
