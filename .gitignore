@@ -25,3 +25,4 @@ libpaligemma_test.so
 paligemma_test
 /kittentts
 /kitten-tts-nano/
+/.kittentts_build/
