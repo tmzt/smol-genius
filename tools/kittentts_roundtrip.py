@@ -2,27 +2,28 @@
 """
 kittentts_roundtrip.py - TTS -> ASR roundtrip test harness
 
-Synthesizes words/phrases with kittentts, transcribes with qwen_asr,
-and compares input vs output text. Measures Word Error Rate (WER).
+Synthesizes words/phrases with kittentts (or macOS say), transcribes
+with qwen_asr, and compares input vs output text. Measures Word Error Rate.
 
 Usage:
-    # Quick smoke test (10 words)
-    python3 tools/kittentts_roundtrip.py --quick
+    # Quick smoke test with kittentts
+    python3 tools/kittentts_roundtrip.py --quick -v
+
+    # Use macOS say as TTS (ground truth baseline)
+    python3 tools/kittentts_roundtrip.py --quick -v --tts say
+
+    # Compare both side by side
+    python3 tools/kittentts_roundtrip.py --quick -v --compare
 
     # Full 20K word sweep
-    python3 tools/kittentts_roundtrip.py --freq .kittentts_build/freq20k.txt
-
-    # Custom word list
-    python3 tools/kittentts_roundtrip.py --words "hello world" "good morning"
-
-    # Phrases from file
-    python3 tools/kittentts_roundtrip.py --phrases phrases.txt
+    python3 tools/kittentts_roundtrip.py --freq .kittentts_build/freq20k.txt --compare
 
 Requirements:
     - ./kittentts binary (make lib MODEL=kittentts APP=1 USE_BLAS=1)
     - ./qwen_asr binary (make lib MODEL=kittentts,qwen_asr APP=1 USE_BLAS=1)
     - kitten-tts-nano/ model directory
     - qwen3-asr-0.6b/ or qwen3-asr-1.7b/ model directory
+    - macOS (for --tts say / --compare)
 """
 
 import argparse
@@ -33,12 +34,34 @@ import tempfile
 import time
 
 
-def synthesize(text, tts_binary, tts_model, wav_path, style=0, speed=1.0):
+def synthesize_kittentts(text, wav_path, tts_binary, tts_model, style=0, speed=1.0):
     """Run kittentts to produce a WAV file. Returns (success, stderr)."""
     cmd = [tts_binary, '-d', tts_model, '-s', str(style),
            '--speed', str(speed), '-o', wav_path, '--silent', text]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     return r.returncode == 0, r.stderr.strip()
+
+
+def synthesize_say(text, wav_path, voice='Samantha'):
+    """Use macOS say to produce a 16kHz mono WAV. Returns (success, stderr)."""
+    try:
+        aiff_path = wav_path + '.aiff'
+        cmd_say = ['say', '-v', voice, '-o', aiff_path, text]
+        r = subprocess.run(cmd_say, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return False, f'say failed: {r.stderr}'
+        cmd_conv = ['afconvert', '-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1',
+                    aiff_path, wav_path]
+        r = subprocess.run(cmd_conv, capture_output=True, text=True, timeout=10)
+        try:
+            os.unlink(aiff_path)
+        except OSError:
+            pass
+        if r.returncode != 0:
+            return False, f'afconvert failed: {r.stderr}'
+        return True, ''
+    except FileNotFoundError:
+        return False, 'say or afconvert not found (macOS only)'
 
 
 def transcribe(wav_path, asr_binary, asr_model):
@@ -61,8 +84,6 @@ def word_error_rate(ref, hyp):
     """Compute word error rate between reference and hypothesis."""
     ref_words = ref.split()
     hyp_words = hyp.split()
-
-    # Levenshtein on words
     r = len(ref_words)
     h = len(hyp_words)
     d = [[0] * (h + 1) for _ in range(r + 1)]
@@ -79,9 +100,10 @@ def word_error_rate(ref, hyp):
     return d[r][h] / max(r, 1)
 
 
-def run_roundtrip(texts, tts_binary, tts_model, asr_binary, asr_model,
-                  style=0, speed=1.0, verbose=False):
-    """Run roundtrip on a list of texts. Returns results list."""
+def run_roundtrip(texts, tts_fn, asr_binary, asr_model, verbose=False):
+    """Run roundtrip on a list of texts with a given TTS function.
+    tts_fn(text, wav_path) -> (success, error_msg)
+    Returns (results, total_tts_ms, total_asr_ms)."""
     results = []
     total_tts_ms = 0
     total_asr_ms = 0
@@ -92,8 +114,7 @@ def run_roundtrip(texts, tts_binary, tts_model, asr_binary, asr_model,
 
             # TTS
             t0 = time.monotonic()
-            ok, tts_err = synthesize(text, tts_binary, tts_model, wav_path,
-                                     style=style, speed=speed)
+            ok, tts_err = tts_fn(text, wav_path)
             tts_ms = (time.monotonic() - t0) * 1000
             total_tts_ms += tts_ms
 
@@ -107,7 +128,6 @@ def run_roundtrip(texts, tts_binary, tts_model, asr_binary, asr_model,
                     print(f'  [{i+1}/{len(texts)}] TTS FAIL: "{text}" -> {tts_err}')
                 continue
 
-            # Check WAV was produced and has content
             if not os.path.exists(wav_path) or os.path.getsize(wav_path) < 100:
                 results.append({
                     'input': text, 'output': '', 'match': False,
@@ -122,7 +142,6 @@ def run_roundtrip(texts, tts_binary, tts_model, asr_binary, asr_model,
             asr_ms = (time.monotonic() - t0) * 1000
             total_asr_ms += asr_ms
 
-            # Compare
             ref_norm = normalize(text)
             hyp_norm = normalize(output)
             match = ref_norm == hyp_norm
@@ -142,11 +161,11 @@ def run_roundtrip(texts, tts_binary, tts_model, asr_binary, asr_model,
     return results, total_tts_ms, total_asr_ms
 
 
-def print_summary(results, total_tts_ms, total_asr_ms):
+def print_summary(label, results, total_tts_ms, total_asr_ms):
     """Print summary statistics."""
     n = len(results)
     if n == 0:
-        print("No results.")
+        print(f"[{label}] No results.")
         return
 
     exact = sum(1 for r in results if r['match'])
@@ -156,7 +175,7 @@ def print_summary(results, total_tts_ms, total_asr_ms):
     avg_asr = total_asr_ms / max(n - errors, 1)
 
     print(f"\n{'=' * 60}")
-    print(f"Roundtrip Results: {n} samples")
+    print(f"[{label}] Roundtrip Results: {n} samples")
     print(f"  Exact match:  {exact}/{n} ({exact/n:.1%})")
     print(f"  Avg WER:      {avg_wer:.1%}")
     print(f"  TTS errors:   {errors}")
@@ -164,13 +183,62 @@ def print_summary(results, total_tts_ms, total_asr_ms):
     print(f"  Avg ASR time: {avg_asr:.0f} ms/sample")
     print(f"  Total time:   {(total_tts_ms + total_asr_ms) / 1000:.1f} s")
 
-    # Show worst mismatches
     mismatches = [r for r in results if not r['match'] and 'error' not in r]
     if mismatches:
         mismatches.sort(key=lambda r: -r['wer'])
-        print(f"\nWorst mismatches (top {min(10, len(mismatches))}):")
+        print(f"\n  Worst mismatches (top {min(10, len(mismatches))}):")
         for r in mismatches[:10]:
-            print(f'  "{r["input"]}" -> "{r["output"]}" (WER={r["wer"]:.0%})')
+            print(f'    "{r["input"]}" -> "{r["output"]}" (WER={r["wer"]:.0%})')
+
+
+def print_comparison(say_results, ktts_results):
+    """Print side-by-side comparison of say vs kittentts."""
+    n = len(say_results)
+
+    say_exact = sum(1 for r in say_results if r['match'])
+    ktts_exact = sum(1 for r in ktts_results if r['match'])
+    say_wer = sum(r['wer'] for r in say_results) / max(n, 1)
+    ktts_wer = sum(r['wer'] for r in ktts_results) / max(n, 1)
+
+    print(f"\n{'=' * 60}")
+    print(f"Comparison: {n} samples")
+    print(f"{'':>25s} {'say':>10s} {'kittentts':>10s}")
+    print(f"{'Exact match':>25s} {say_exact:>9d}  {ktts_exact:>9d}")
+    print(f"{'Match rate':>25s} {say_exact/max(n,1):>9.1%}  {ktts_exact/max(n,1):>9.1%}")
+    print(f"{'Avg WER':>25s} {say_wer:>9.1%}  {ktts_wer:>9.1%}")
+
+    # Per-sample comparison
+    both_ok = 0
+    say_only = 0
+    ktts_only = 0
+    neither = 0
+    for s, k in zip(say_results, ktts_results):
+        sm, km = s['match'], k['match']
+        if sm and km:
+            both_ok += 1
+        elif sm and not km:
+            say_only += 1
+        elif not sm and km:
+            ktts_only += 1
+        else:
+            neither += 1
+
+    print(f"\n  Both correct:     {both_ok}")
+    print(f"  say only:         {say_only}")
+    print(f"  kittentts only:   {ktts_only}")
+    print(f"  Neither:          {neither}")
+
+    # Show where they differ
+    diffs = []
+    for s, k in zip(say_results, ktts_results):
+        if s['output'] != k['output']:
+            diffs.append((s['input'], s['output'], k['output']))
+    if diffs:
+        print(f"\n  Differing outputs (top {min(10, len(diffs))}):")
+        for inp, s_out, k_out in diffs[:10]:
+            print(f'    "{inp}"')
+            print(f'      say:       "{s_out}"')
+            print(f'      kittentts: "{k_out}"')
 
 
 def build_test_phrases(words, group_size=3):
@@ -183,13 +251,32 @@ def build_test_phrases(words, group_size=3):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='KittenTTS -> Qwen ASR roundtrip test')
+    parser = argparse.ArgumentParser(
+        description='TTS -> ASR roundtrip test',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+TTS engines:
+  kittentts   Use ./kittentts binary (default)
+  say         Use macOS say command (ground truth baseline)
+
+Examples:
+  %(prog)s --quick -v                        # kittentts quick test
+  %(prog)s --quick -v --tts say              # macOS say quick test
+  %(prog)s --quick -v --compare              # side-by-side comparison
+  %(prog)s --freq .kittentts_build/freq20k.txt --limit 100 --compare
+""")
+    parser.add_argument('--tts', default='kittentts', choices=['kittentts', 'say'],
+                       help='TTS engine (default: kittentts)')
+    parser.add_argument('--compare', action='store_true',
+                       help='Run both kittentts and say, compare results')
     parser.add_argument('--tts-binary', default='./kittentts')
     parser.add_argument('--tts-model', default='kitten-tts-nano')
+    parser.add_argument('--say-voice', default='Samantha',
+                       help='macOS say voice (default: Samantha)')
     parser.add_argument('--asr-binary', default='./qwen_asr')
-    parser.add_argument('--asr-model', default='qwen3-asr-0.6b',
-                       help='ASR model dir (qwen3-asr-0.6b or qwen3-asr-1.7b)')
-    parser.add_argument('--style', type=int, default=0, help='Voice style 0-7')
+    parser.add_argument('--asr-model', default='models/qwen3-asr-0.6b',
+                       help='ASR model dir')
+    parser.add_argument('--style', type=int, default=0, help='KittenTTS voice style 0-7')
     parser.add_argument('--speed', type=float, default=1.0)
     parser.add_argument('--words', nargs='+', help='Specific words to test')
     parser.add_argument('--phrases', help='File with one phrase per line')
@@ -203,18 +290,14 @@ def main():
     parser.add_argument('--verbose', '-v', action='store_true')
     args = parser.parse_args()
 
-    # Check binaries exist
-    for name, path in [('TTS', args.tts_binary), ('ASR', args.asr_binary)]:
-        if not os.path.exists(path):
-            print(f"Error: {name} binary not found: {path}")
-            print(f"Build with: make lib MODEL=kittentts,qwen_asr USE_BLAS=1 APP=1")
-            return 1
-
-    # Check model dirs
-    for name, path in [('TTS', args.tts_model), ('ASR', args.asr_model)]:
-        if not os.path.isdir(path):
-            print(f"Error: {name} model dir not found: {path}")
-            return 1
+    # Check ASR binary
+    if not os.path.exists(args.asr_binary):
+        print(f"Error: ASR binary not found: {args.asr_binary}")
+        print(f"Build with: make lib MODEL=kittentts,qwen_asr USE_BLAS=1 APP=1")
+        return 1
+    if not os.path.isdir(args.asr_model):
+        print(f"Error: ASR model dir not found: {args.asr_model}")
+        return 1
 
     # Build text list
     if args.quick:
@@ -240,18 +323,60 @@ def main():
         print("\nSpecify --quick, --words, --phrases, or --freq")
         return 1
 
-    print(f"Roundtrip test: {len(texts)} samples")
-    print(f"  TTS: {args.tts_binary} -d {args.tts_model} (voice {args.style})")
-    print(f"  ASR: {args.asr_binary} -d {args.asr_model}")
-    print()
+    auto_verbose = args.verbose or len(texts) <= 20
 
-    results, tts_ms, asr_ms = run_roundtrip(
-        texts, args.tts_binary, args.tts_model,
-        args.asr_binary, args.asr_model,
-        style=args.style, speed=args.speed,
-        verbose=args.verbose or len(texts) <= 20)
+    # Build TTS functions
+    def make_kittentts_fn():
+        if not os.path.exists(args.tts_binary):
+            print(f"Error: kittentts binary not found: {args.tts_binary}")
+            sys.exit(1)
+        if not os.path.isdir(args.tts_model):
+            print(f"Error: kittentts model dir not found: {args.tts_model}")
+            sys.exit(1)
+        return lambda text, wav: synthesize_kittentts(
+            text, wav, args.tts_binary, args.tts_model,
+            style=args.style, speed=args.speed)
 
-    print_summary(results, tts_ms, asr_ms)
+    def make_say_fn():
+        return lambda text, wav: synthesize_say(text, wav, voice=args.say_voice)
+
+    if args.compare:
+        # Run both engines
+        print(f"Roundtrip comparison: {len(texts)} samples")
+        print(f"  ASR: {args.asr_binary} -d {args.asr_model}")
+        print()
+
+        print(f"--- macOS say (voice: {args.say_voice}) ---")
+        say_fn = make_say_fn()
+        say_results, say_tts, say_asr = run_roundtrip(
+            texts, say_fn, args.asr_binary, args.asr_model, verbose=auto_verbose)
+        print_summary('say', say_results, say_tts, say_asr)
+
+        print(f"\n--- kittentts (voice: {args.style}) ---")
+        ktts_fn = make_kittentts_fn()
+        ktts_results, ktts_tts, ktts_asr = run_roundtrip(
+            texts, ktts_fn, args.asr_binary, args.asr_model, verbose=auto_verbose)
+        print_summary('kittentts', ktts_results, ktts_tts, ktts_asr)
+
+        print_comparison(say_results, ktts_results)
+    else:
+        # Single engine
+        if args.tts == 'say':
+            label = f'say (voice: {args.say_voice})'
+            tts_fn = make_say_fn()
+        else:
+            label = f'kittentts (voice: {args.style})'
+            tts_fn = make_kittentts_fn()
+
+        print(f"Roundtrip test: {len(texts)} samples")
+        print(f"  TTS: {label}")
+        print(f"  ASR: {args.asr_binary} -d {args.asr_model}")
+        print()
+
+        results, tts_ms, asr_ms = run_roundtrip(
+            texts, tts_fn, args.asr_binary, args.asr_model, verbose=auto_verbose)
+        print_summary(args.tts, results, tts_ms, asr_ms)
+
     return 0
 
 
