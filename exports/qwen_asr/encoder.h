@@ -84,7 +84,7 @@ __attribute__((visibility("default")))
 int qwen_asr_encoder_load(qwen_asr_encoder_t *enc, multi_safetensors_t *ms,
                            const qwen_asr_enc_config_t *cfg);
 
-/* Encoder forward pass.
+/* Encoder forward pass (full: mel → encoder output).
  * mel: [128, mel_frames] mel spectrogram
  * Returns encoder output embeddings (caller must free), sets *out_seq_len. */
 __attribute__((visibility("default")))
@@ -92,5 +92,20 @@ float *qwen_asr_encoder_forward(qwen_asr_encoder_t *enc,
                                  const qwen_asr_enc_config_t *cfg,
                                  const float *mel, int mel_frames,
                                  int *out_seq_len);
+
+/* ---- Split API for GPU-accelerated encoder ---- */
+
+/* Conv stem only: mel → token embeddings [total_tokens, d_model].
+ * Runs Conv2D + reshape + projection + sinusoidal PE on CPU.
+ * Returns token embeddings (caller must free), sets *out_tokens.
+ * Also sets *out_window_starts (caller must free) and *out_n_windows
+ * for the attention window boundaries. */
+__attribute__((visibility("default")))
+float *qwen_asr_encoder_conv_stem(qwen_asr_encoder_t *enc,
+                                   const qwen_asr_enc_config_t *cfg,
+                                   const float *mel, int mel_frames,
+                                   int *out_tokens,
+                                   int **out_window_starts,
+                                   int *out_n_windows);
 
 #endif /* QWEN_ASR_ENCODER_H */

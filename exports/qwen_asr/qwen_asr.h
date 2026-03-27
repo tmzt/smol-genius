@@ -240,6 +240,29 @@ __attribute__((visibility("default")))
 void qwen_set_shared_atomics(qwen_ctx_t *ctx, _Atomic uint32_t *atomics, int len);
 
 
+/* ---- Split encoder API for GPU acceleration ---- */
+
+/* Run mel spectrogram on raw audio samples.
+ * Returns mel [128, *out_mel_frames] (caller must free). */
+__attribute__((visibility("default")))
+float *qwen_mel_spectrogram(const float *samples, int n_samples, int *out_mel_frames);
+
+/* Run conv stem only: mel → token embeddings [*out_tokens, d_model].
+ * Returns token embeddings (caller must free).
+ * Sets *out_tokens, *out_d_model. */
+__attribute__((visibility("default")))
+float *qwen_encoder_conv_stem(qwen_ctx_t *ctx,
+                               const float *mel, int mel_frames,
+                               int *out_tokens, int *out_d_model);
+
+/* Run decoder with externally-provided encoder output.
+ * enc_output: [enc_seq_len, output_dim] from GPU encoder.
+ * Returns text (caller must free), or NULL on failure. */
+__attribute__((visibility("default")))
+char *qwen_decode_with_encoder_output(qwen_ctx_t *ctx,
+                                       const float *enc_output, int enc_seq_len,
+                                       int output_dim);
+
 /* ========================================================================
  * Globals
  * ======================================================================== */
