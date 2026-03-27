@@ -130,6 +130,13 @@ typedef struct {
     _Atomic uint32_t pipeline_state;   /* qwen_pipeline_state_t */
     _Atomic uint32_t control_action;   /* qwen_control_action_t */
 
+    /* External shared atomics (optional, set via qwen_set_shared_atomics).
+     * When non-NULL, pipeline writes state/diagnostics directly here.
+     * Layout: [0]=pipeline_state, [1]=energy_gate, [2]=ww_gate,
+     *         [8]=mel_count, [9]=encoder_count, [10]=token_count, [11]=audio_chunks */
+    _Atomic uint32_t *shared_atomics;
+    int shared_atomics_len;
+
     /* Per-run performance stats */
     double perf_total_ms;
     int perf_text_tokens;
@@ -225,6 +232,12 @@ void qwen_post_control(qwen_ctx_t *ctx, qwen_control_action_t action);
 /* Read current pipeline state (caller thread). */
 __attribute__((visibility("default")))
 qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx);
+
+/* Set external shared atomics array. The pipeline writes state and
+ * diagnostics directly to this array (no copying). The array must
+ * outlive the pipeline. Pass NULL to disable. */
+__attribute__((visibility("default")))
+void qwen_set_shared_atomics(qwen_ctx_t *ctx, _Atomic uint32_t *atomics, int len);
 
 
 /* ========================================================================
