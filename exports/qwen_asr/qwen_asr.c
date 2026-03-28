@@ -597,11 +597,16 @@ static char *transcribe_segment(qwen_ctx_t *ctx, const float *samples,
     if (qwen_verbose >= 2)
         fprintf(stderr, "  Mel: %d frames (%.0f ms)\n", mel_frames, mel_ms);
 
-    /* ---- Encoder ---- */
+    /* ---- Encoder (GPU callback or CPU fallback) ---- */
     t0 = get_time_ms();
     int enc_seq_len = 0;
-    float *enc_output = qwen_asr_encoder_forward(&ctx->encoder, &ctx->enc_config,
-                                                  mel, mel_frames, &enc_seq_len);
+    float *enc_output;
+    if (ctx->encoder_cb) {
+        enc_output = ctx->encoder_cb(mel, mel_frames, &enc_seq_len, ctx->encoder_cb_userdata);
+    } else {
+        enc_output = qwen_asr_encoder_forward(&ctx->encoder, &ctx->enc_config,
+                                               mel, mel_frames, &enc_seq_len);
+    }
     free(mel);
     if (!enc_output) return NULL;
     double enc_ms = get_time_ms() - t0;
@@ -1057,13 +1062,19 @@ static int stream_encode_span(qwen_ctx_t *ctx, const float *samples, int n_sampl
               mel_frames, avg, n_samples); }
 
     int seq_len = 0;
-    float *enc_output = qwen_asr_encoder_forward(&ctx->encoder, &ctx->enc_config,
-                                                  mel, mel_frames, &seq_len);
+    float *enc_output;
+    if (ctx->encoder_cb) {
+        enc_output = ctx->encoder_cb(mel, mel_frames, &seq_len, ctx->encoder_cb_userdata);
+    } else {
+        enc_output = qwen_asr_encoder_forward(&ctx->encoder, &ctx->enc_config,
+                                               mel, mel_frames, &seq_len);
+    }
     free(mel);
     if (!enc_output) return -1;
     SA_INC(ctx, SA_ENCODER_COUNT);
 
-    fprintf(stderr, "[c-asr-stream] encoder=%d tokens\n", seq_len);
+    fprintf(stderr, "[c-asr-stream] encoder=%d tokens (gpu=%d)\n",
+            seq_len, ctx->encoder_cb != NULL);
 
     *out_enc_output = enc_output;
     *out_seq_len = seq_len;
@@ -2213,6 +2224,15 @@ qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx) {
     if (!ctx) return QWEN_PIPELINE_IDLE;
     return (qwen_pipeline_state_t)atomic_load_explicit(
         (_Atomic uint32_t *)&ctx->pipeline_state, memory_order_acquire);
+}
+
+void qwen_set_encoder_callback(qwen_ctx_t *ctx,
+    float *(*cb)(const float *mel, int mel_frames, int *out_seq_len, void *userdata),
+    void *userdata) {
+    if (!ctx) return;
+    ctx->encoder_cb = cb;
+    ctx->encoder_cb_userdata = userdata;
+    fprintf(stderr, "[c-asr] encoder_cb set: %p\n", (void*)cb);
 }
 
 void qwen_set_shared_atomics(qwen_ctx_t *ctx, _Atomic uint32_t *atomics, int len) {
