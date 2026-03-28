@@ -241,15 +241,6 @@ def print_comparison(say_results, ktts_results):
             print(f'      kittentts: "{k_out}"')
 
 
-def build_test_phrases(words, group_size=3):
-    """Group individual words into short phrases for more realistic TTS."""
-    phrases = []
-    for i in range(0, len(words), group_size):
-        phrase = ' '.join(words[i:i + group_size])
-        phrases.append(phrase)
-    return phrases
-
-
 def main():
     parser = argparse.ArgumentParser(
         description='TTS -> ASR roundtrip test',
@@ -263,7 +254,7 @@ Examples:
   %(prog)s --quick -v                        # kittentts quick test
   %(prog)s --quick -v --tts say              # macOS say quick test
   %(prog)s --quick -v --compare              # side-by-side comparison
-  %(prog)s --freq .kittentts_build/freq20k.txt --limit 100 --compare
+  %(prog)s --freq .kittentts_build/freq20k.txt --limit 100 --compare  # top 100 words
 """)
     parser.add_argument('--tts', default='kittentts', choices=['kittentts', 'say'],
                        help='TTS engine (default: kittentts)')
@@ -283,10 +274,8 @@ Examples:
     parser.add_argument('--freq', help='Word frequency file (one word per line)')
     parser.add_argument('--limit', type=int, default=100,
                        help='Max words from frequency list (default: 100)')
-    parser.add_argument('--group-size', type=int, default=3,
-                       help='Words per phrase when using --freq (default: 3)')
     parser.add_argument('--quick', action='store_true',
-                       help='Quick smoke test with 10 common phrases')
+                       help='Quick smoke test with 20 common words')
     parser.add_argument('--verbose', '-v', action='store_true')
     args = parser.parse_args()
 
@@ -299,14 +288,13 @@ Examples:
         print(f"Error: ASR model dir not found: {args.asr_model}")
         return 1
 
-    # Build text list
+    # Build text list — one word per sample for clean comparison
     if args.quick:
         texts = [
-            "hello", "world", "hello world",
-            "the quick brown fox", "good morning",
-            "one two three four five",
-            "this is a test", "how are you",
-            "computer science", "artificial intelligence",
+            "hello", "world", "good", "morning", "test",
+            "one", "two", "three", "four", "five",
+            "computer", "science", "artificial", "intelligence",
+            "the", "quick", "brown", "fox", "jumps", "over",
         ]
     elif args.words:
         texts = args.words
@@ -316,8 +304,7 @@ Examples:
     elif args.freq:
         with open(args.freq) as f:
             words = [w.strip() for w in f if w.strip() and w.strip().isascii()]
-        words = words[:args.limit]
-        texts = build_test_phrases(words, args.group_size)
+        texts = words[:args.limit]
     else:
         parser.print_help()
         print("\nSpecify --quick, --words, --phrases, or --freq")
