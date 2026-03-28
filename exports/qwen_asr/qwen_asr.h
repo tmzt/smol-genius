@@ -130,6 +130,13 @@ typedef struct {
     _Atomic uint32_t pipeline_state;   /* qwen_pipeline_state_t */
     _Atomic uint32_t control_action;   /* qwen_control_action_t */
 
+    /* External encoder callback (optional, set via qwen_set_encoder_callback).
+     * When set, replaces the internal C encoder with a GPU-accelerated one.
+     * Callback receives: mel [128, mel_frames], returns encoder output
+     * [*out_seq_len, output_dim] (caller must free). */
+    float *(*encoder_cb)(const float *mel, int mel_frames, int *out_seq_len, void *userdata);
+    void *encoder_cb_userdata;
+
     /* External shared atomics (optional, set via qwen_set_shared_atomics).
      * When non-NULL, pipeline writes state/diagnostics directly here.
      * Layout: [0]=pipeline_state, [1]=energy_gate, [2]=ww_gate,
@@ -232,6 +239,14 @@ void qwen_post_control(qwen_ctx_t *ctx, qwen_control_action_t action);
 /* Read current pipeline state (caller thread). */
 __attribute__((visibility("default")))
 qwen_pipeline_state_t qwen_get_pipeline_state(const qwen_ctx_t *ctx);
+
+/* Set external encoder callback. When set, the pipeline calls this
+ * instead of the internal C encoder. The callback receives mel spectrogram
+ * and must return encoder output (caller frees). Pass NULL to disable. */
+__attribute__((visibility("default")))
+void qwen_set_encoder_callback(qwen_ctx_t *ctx,
+    float *(*cb)(const float *mel, int mel_frames, int *out_seq_len, void *userdata),
+    void *userdata);
 
 /* Set external shared atomics array. The pipeline writes state and
  * diagnostics directly to this array (no copying). The array must
