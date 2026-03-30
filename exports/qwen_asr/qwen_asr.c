@@ -180,9 +180,12 @@ static int detect_config(qwen_ctx_t *ctx, multi_safetensors_t *ms) {
     qwen_asr_enc_config_t *enc = &ctx->enc_config;
     qkn_config_t *dec = &ctx->dec_config;
 
-    /* Check for layer 18 (0-indexed) in encoder - if it exists, it's 1.7B */
+    /* Check for layer 18 (0-indexed) in encoder - if it exists, it's 1.7B.
+     * Try both HF format (thinker.audio_tower.*) and MLX format (audio_tower.*). */
     const safetensor_t *test = multi_safetensors_find(ms,
         "thinker.audio_tower.layers.18.self_attn.q_proj.weight", NULL);
+    if (!test) test = multi_safetensors_find(ms,
+        "audio_tower.layers.18.self_attn.q_proj.weight", NULL);
 
     if (test) {
         /* 1.7B model */
@@ -262,24 +265,22 @@ qwen_ctx_t *qwen_load(const char *model_dir) {
         return NULL;
     }
 
-    /* Load decoder weights */
+    /* Load decoder weights (non-fatal — GPU AsrModel handles decoding) */
     if (qwen_verbose >= 1) fprintf(stderr, "Loading decoder weights...\n");
     if (qkn_decoder_load(&ctx->dec_ctx.decoder, ms, &ctx->dec_config,
                           "thinker.model") != 0) {
-        fprintf(stderr, "qwen_load: failed to load decoder\n");
-        qwen_free(ctx);
-        return NULL;
+        if (qwen_verbose >= 1)
+            fprintf(stderr, "qwen_load: C decoder not loaded (quantized model?), GPU decoder will handle\n");
+    } else {
+        ctx->dec_ctx.config = ctx->dec_config;
     }
-    ctx->dec_ctx.config = ctx->dec_config;
 
-    /* Load tokenizer */
+    /* Load tokenizer (non-fatal — GPU decoder has its own) */
     char vocab_path[1024];
     snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.json", model_dir);
     ctx->tokenizer = smol_tokenizer_load(vocab_path);
-    if (!ctx->tokenizer) {
-        fprintf(stderr, "qwen_load: failed to load tokenizer from %s\n", vocab_path);
-        qwen_free(ctx);
-        return NULL;
+    if (!ctx->tokenizer && qwen_verbose >= 1) {
+        fprintf(stderr, "qwen_load: tokenizer not found (GPU decoder will handle)\n");
     }
 
     /* Default transcription mode: full-audio offline decode (no splitting). */
