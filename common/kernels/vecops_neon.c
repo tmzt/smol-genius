@@ -8,7 +8,19 @@
 
 #include <arm_neon.h>
 
-float smol_dot_f32_neon(const float *a, const float *b, int n) {
+/* Fallback for compilers that don't define vfmaq_f32 (Fused Multiply-Add) */
+#ifndef vfmaq_f32
+#define vfmaq_f32(acc, a, b) vaddq_f32(acc, vmulq_f32(a, b))
+#endif
+
+/* Fallback for horizontal addition (vaddvq_f32 is ARMv8/AArch64 only) */
+#if defined(__arm__) && !defined(vaddvq_f32)
+static inline float vaddvq_f32(float32x4_t v) {
+    return vgetq_lane_f32(v, 0) + vgetq_lane_f32(v, 1) + vgetq_lane_f32(v, 2) + vgetq_lane_f32(v, 3);
+}
+#endif
+
+float smol_vec_dot_neon(const float *a, const float *b, int n) {
     int i = 0;
     float32x4_t acc0 = vdupq_n_f32(0.0f);
     float32x4_t acc1 = vdupq_n_f32(0.0f);

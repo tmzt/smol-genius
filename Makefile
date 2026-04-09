@@ -38,12 +38,17 @@ ifndef ARCH
 endif
 
 # Architecture-specific compiler flags
+MARCH ?= native
 ifeq ($(ARCH),neon)
-  CFLAGS += -march=native
+  CFLAGS += -march=$(MARCH)
+  # For 32-bit ARM (v7), we need to explicitly enable NEON FPU
+  ifneq (,$(findstring armv7,$(MARCH)))
+    CFLAGS += -mfpu=neon
+  endif
 else ifeq ($(ARCH),avx)
-  CFLAGS += -march=native -mavx2 -mfma
+  CFLAGS += -march=$(MARCH) -mavx2 -mfma
 else
-  CFLAGS += -march=native
+  CFLAGS += -march=$(MARCH)
 endif
 
 # BLAS support

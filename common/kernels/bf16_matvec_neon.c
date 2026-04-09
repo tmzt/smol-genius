@@ -9,6 +9,18 @@
 #include <arm_neon.h>
 #include <string.h>
 
+/* Fallback for compilers that don't define vfmaq_f32 (Fused Multiply-Add) */
+#ifndef vfmaq_f32
+#define vfmaq_f32(acc, a, b) vaddq_f32(acc, vmulq_f32(a, b))
+#endif
+
+/* Fallback for horizontal addition (vaddvq_f32 is ARMv8/AArch64 only) */
+#if defined(__arm__) && !defined(vaddvq_f32)
+static inline float vaddvq_f32(float32x4_t v) {
+    return vgetq_lane_f32(v, 0) + vgetq_lane_f32(v, 1) + vgetq_lane_f32(v, 2) + vgetq_lane_f32(v, 3);
+}
+#endif
+
 void smol_bf16_matvec_fused_neon(float *y, const float *x, const uint16_t *W_bf16,
                                  const float *bias, int in_dim, int out_dim) {
     int o = 0;
